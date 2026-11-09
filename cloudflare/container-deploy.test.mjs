@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { validateContainerConfig } from "./check-container-config.mjs";
 
-const config = JSON.parse(await readFile(new URL("./wrangler.container-deploy.jsonc", import.meta.url), "utf8"));
+const config = JSON.parse(await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
 
 test("deployment candidate refuses the placeholder D1 ID before any migration", () => {
   assert.deepEqual(validateContainerConfig(config), ["Set DB.database_id to the ID of the intended D1 database.",
@@ -33,5 +33,26 @@ test("deployment candidate requires both durable stores and their secret declara
     const broken = structuredClone(valid);
     mutate(broken);
     assert.notEqual(validateContainerConfig(broken).length, 0);
+  }
+});
+
+
+test("development secrets are excluded from git and runtime data is excluded from container builds", async () => {
+  for (const path of [".dev.vars", "cloudflare/.dev.vars", ".dev.vars.production"]) {
+    const ignored = spawnSync("git", ["check-ignore", "--no-index", "--quiet", path]);
+    assert.equal(ignored.status, 0, `${path} must be ignored`);
+  }
+  const example = spawnSync("git", ["check-ignore", "--no-index", "--quiet", ".dev.vars.example"]);
+  assert.equal(example.status, 1, "the secret-name example must remain trackable");
+  const ignore = await readFile(new URL("../.dockerignore", import.meta.url), "utf8");
+  for (const pattern of ["**/.dev.vars*", "**/*.db", "**/*.sqlite", "data/*"]) {
+    assert.ok(ignore.split(/\r?\n/).includes(pattern), `${pattern} must be excluded from the build context`);
+  }
+  const dockerfile = await readFile(new URL("../Dockerfile", import.meta.url), "utf8");
+  assert.doesNotMatch(dockerfile, /^COPY\s+data\/\s+\.\/data\//m);
+  for (const name of ["holidays.json", "nse_equity_symbols_all.csv", "nse_equity_symbols_all.txt",
+    "nse_equity_symbols_eq.csv", "nse_equity_symbols_eq.txt", "sample_tickers.txt"]) {
+    assert.ok(dockerfile.includes(`data/${name}`));
+    assert.ok(ignore.split(/\r?\n/).includes(`!data/${name}`));
   }
 });

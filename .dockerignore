@@ -20,3 +20,26 @@ backend/.env
 .env
 .env.*
 !.env.example
+
+# Keep local credentials, runtime state and test environments out of the build context.
+**/.dev.vars*
+**/.env
+**/.env.*
+**/.wrangler
+.venv-cloudflare/
+.codex_tmp_*/
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite3
+**/*.sqlite3-*
+
+# Only public, versioned reference data is part of the image.
+data/*
+!data/holidays.json
+!data/nse_equity_symbols_all.csv
+!data/nse_equity_symbols_all.txt
+!data/nse_equity_symbols_eq.csv
+!data/nse_equity_symbols_eq.txt
+!data/sample_tickers.txt

@@ -19,7 +19,8 @@ COPY backend/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY backend/ ./backend/
-COPY data/ ./data/
+COPY data/holidays.json data/nse_equity_symbols_all.csv data/nse_equity_symbols_all.txt \
+     data/nse_equity_symbols_eq.csv data/nse_equity_symbols_eq.txt data/sample_tickers.txt ./data/
 COPY plugins/ ./plugins/
 COPY scripts/ ./scripts/
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist

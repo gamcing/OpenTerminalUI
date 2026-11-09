@@ -93,6 +93,9 @@ frontend/public/landing/uploads/
 # Local JWT used by scripts/capture_*.mjs
 .ot-token
 
-# Cloudflare local state
+# Cloudflare local state and development secrets
 .wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
 .codex_tmp_d1/

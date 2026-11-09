@@ -31,6 +31,14 @@ Bloomberg-style workflows, primary-document intelligence and a tool-using AI ana
 
 ---
 
+## Cloudflare deployment (experimental)
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https%3A%2F%2Fgithub.com%2Fgamcing%2FOpenTerminalUI%2Ftree%2Fcodex%2Fcloudflare-deployment)
+
+The button targets the Cloudflare development branch and is **not yet verified end to end**. The container, D1 snapshot database and R2 artifact storage remain experimental; use only disposable data. See the [Cloudflare deployment guide](cloudflare/README.md) for required secrets, costs and current limitations.
+
+---
+
 ## Why OpenTerminalUI
 
 Most retail tools stop at price charts and ratios. OpenTerminalUI is built for the research that actually moves a position: reading what a company filed, tracking what management promised, mapping who it sells to and buys from, and testing an idea before money goes in.

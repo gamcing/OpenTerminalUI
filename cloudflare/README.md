@@ -1,36 +1,26 @@
-# Cloudflare frontend deployment (partial)
+# Cloudflare deployment (experimental)
 
-This configuration deploys the frontend and a same-origin API proxy to Cloudflare Workers. It requires an **existing HTTPS OpenTerminalUI backend**. It does not deploy the Python backend, provision a database, or store application data in Cloudflare D1. This is not a complete one-click Cloudflare deployment.
+The repository root `wrangler.jsonc` and `npm run deploy` target the container, D1 and R2 experiment. The Deploy to Cloudflare button in the repository README points to this development branch. **The complete button flow, container image and Cloudflare persistence have not been verified in a real account. Do not use this for live data.**
 
-## Requirements
+## Experimental repository deployment
 
-- A Cloudflare account with Workers enabled and Node.js 20 or later.
-- An existing OpenTerminalUI backend with persistent storage, served over HTTPS. Configure production secrets and authentication on the backend before exposing it to the internet.
-- Access to deploy Workers with Wrangler.
+The root configuration declares a Durable Object container, a `DB` D1 binding, a `BACKTESTS` R2 binding and the required Worker secrets. The intended Deploy to Cloudflare flow creates a copy of the repository and provisions the declared resources; Workers Builds runs the root build and deploy scripts. Enter the administrator email and independently generated secrets when prompted. The root `.dev.vars.example` lists secret names only. Keep the Fernet provider encryption key stable and backed up: losing it makes saved provider settings unreadable. Containers and storage may incur Cloudflare charges.
 
-## Deploy
+The deploy command checks that the database ID is no longer a placeholder, applies D1 migrations using the `DB` binding, then deploys the Worker and container. This preflight cannot verify account ownership, secret values, resource permissions or real container operation. The migration and deployment are separate operations; a failed deployment may leave the migrations applied. After an administrator is created, remove the bootstrap password from both `secrets.required` in the copied repository and the Worker's secrets if it is no longer needed. Existing users without an administrator require manual recovery.
 
-From the repository root:
+For a manual experimental deploy, create a D1 database and R2 bucket first, replace the placeholder ID and resource names in `wrangler.jsonc`, set the administrator email, and configure the listed Worker secrets. Then run `npm run deploy`. A local deploy using the Dockerfile requires a running Docker-compatible engine. A disposable local migration check is available with `npx wrangler@4 d1 migrations apply DB --local --persist-to .codex_tmp_container_migrations`; it does not deploy a container or provision remote resources.
+
+## Frontend proxy for an existing backend
+
+`cloudflare/wrangler.frontend.jsonc` retains the frontend-only deployment. It requires an **existing HTTPS OpenTerminalUI backend** with persistent storage, and does not provision or store its database in D1.
 
 ```sh
 npm run build
 npx wrangler@4 login
-npx wrangler@4 deploy --var BACKEND_ORIGIN:https://backend.example.com
+npm run deploy:frontend -- --var BACKEND_ORIGIN:https://backend.example.com
 ```
 
-Replace `https://backend.example.com` with the backend origin (scheme and host, no path or trailing query). The origin must be HTTPS and must not be the Worker URL. API requests and WebSocket upgrades under `/api`, along with the backend health endpoints, are forwarded to this origin; all other requests are served from the built frontend. Requests to the backend fail with HTTP 503 if the origin is missing or invalid.
-
-For Git-connected Workers Builds, set the build command to `npm run build`, the deploy command to `npx wrangler@4 deploy`, and configure `BACKEND_ORIGIN` as a Worker variable in the dashboard. Keep its value when changing deployment methods: Wrangler configuration and dashboard environment-variable settings can override each other.
-
-The proxy does not authenticate or firewall the backend origin. Secure the backend itself and restrict direct origin access as appropriate for your setup. In particular, do not point it at a development backend with development authentication enabled.
-
-## Container deployment candidate (experimental)
-
-`wrangler.container-deploy.jsonc` is a separate candidate for the full container, D1 and R2 setup. It is not the default `wrangler.jsonc`, and it is **not ready for live data**. Before using it with a disposable Cloudflare account, create a D1 database and R2 bucket, replace the placeholder database ID and resource names with those resources, and set `BOOTSTRAP_ADMIN_EMAIL` in the candidate configuration. Configure the secret names in `cloudflare/.dev.vars.example` as Worker secrets; do not commit their values. The bootstrap password is required for an empty database. After an administrator has been created, remove the bootstrap password from both the candidate's `secrets.required` list and the Worker's secrets if it is no longer needed. Keep the provider encryption key stable and backed up.
-
-`npm run deploy:cloudflare:experiment` first checks the candidate configuration, then applies D1 migrations using the `DB` binding, and finally deploys the Worker and container. The check rejects the placeholder database ID and missing storage bindings, but cannot verify resource ownership, secret values, or permissions. The command **does not create the D1 database or R2 bucket**. Migrations and deployment are separate remote operations: a failed deployment can leave migrations applied. A local deploy using the Dockerfile requires a running Docker-compatible engine; the container image and runtime have not been validated on Cloudflare. The existing `npm run deploy` continues to deploy only the frontend proxy.
-
-For a disposable local migration check, use `npx wrangler@4 d1 migrations apply DB --local --config cloudflare/wrangler.container-deploy.jsonc --persist-to .codex_tmp_container_migrations`. This does not validate remote provisioning, Worker secrets, or a container build.
+Replace the example origin with the backend origin, using HTTPS and no path or query. API and WebSocket requests under `/api`, plus backend health endpoints, are forwarded to it; other requests use the built frontend. A missing or invalid origin returns HTTP 503. For Git-connected Workers Builds, use `npm run build` and `npm run deploy:frontend` and configure `BACKEND_ORIGIN` for that Worker. Secure the backend itself and restrict direct origin access as appropriate; the proxy does not authenticate or firewall it.
 
 ## Remaining work for a full Cloudflare deployment
 

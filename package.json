@@ -5,9 +5,35 @@
   "scripts": {
     "build": "npm ci --prefix frontend && npm run build --prefix frontend",
     "test:cloudflare": "node --test cloudflare/*.test.mjs",
-    "deploy": "npx wrangler@4 deploy",
-    "migrate:cloudflare:experiment": "npm run check:cloudflare:experiment && npx --yes wrangler@4 d1 migrations apply DB --remote --config cloudflare/wrangler.container-deploy.jsonc",
-    "deploy:cloudflare:experiment": "npm run migrate:cloudflare:experiment && npx --yes wrangler@4 deploy --config cloudflare/wrangler.container-deploy.jsonc",
-    "check:cloudflare:experiment": "node cloudflare/check-container-config.mjs"
+    "deploy": "npm run migrate:cloudflare:experiment && npx --yes wrangler@4 deploy",
+    "migrate:cloudflare:experiment": "npm run check:cloudflare:experiment && npx --yes wrangler@4 d1 migrations apply DB --remote",
+    "deploy:cloudflare:experiment": "npm run deploy",
+    "check:cloudflare:experiment": "node cloudflare/check-container-config.mjs",
+    "deploy:frontend": "npx --yes wrangler@4 deploy --config cloudflare/wrangler.frontend.jsonc"
+  },
+  "cloudflare": {
+    "bindings": {
+      "BOOTSTRAP_ADMIN_EMAIL": {
+        "description": "Administrator email for the initial login."
+      },
+      "BOOTSTRAP_ADMIN_PASSWORD": {
+        "description": "Initial administrator password, 8 characters minimum and at most 72 UTF-8 bytes."
+      },
+      "JWT_SECRET_KEY": {
+        "description": "Unique high-entropy JWT signing secret; keep it stable across deployments."
+      },
+      "CACHE_SIGNING_KEY": {
+        "description": "Independent high-entropy cache signing secret."
+      },
+      "D1_BRIDGE_TOKEN": {
+        "description": "Independent private D1 gateway secret, at least 32 characters."
+      },
+      "R2_BRIDGE_TOKEN": {
+        "description": "Independent private R2 gateway secret, at least 32 characters."
+      },
+      "OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY": {
+        "description": "Stable 44-character URL-safe Fernet key; back it up securely."
+      }
+    }
   }
 }

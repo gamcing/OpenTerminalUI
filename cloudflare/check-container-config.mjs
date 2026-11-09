@@ -15,7 +15,7 @@ export function validateContainerConfig(config) {
     errors.push("Set DB.database_id to the ID of the intended D1 database.");
   if (typeof database?.database_name !== "string" || !database.database_name.trim())
     errors.push("Set DB.database_name to the intended D1 database name.");
-  if (database?.migrations_dir !== "migrations")
+  if (database?.migrations_dir !== "cloudflare/migrations")
     errors.push("DB.migrations_dir must point to the bundled D1 migrations.");
   const bucket = Array.isArray(config?.r2_buckets) ? config.r2_buckets.find(item => item?.binding === "BACKTESTS") : null;
   if (typeof bucket?.bucket_name !== "string" || !bucket.bucket_name.trim())
@@ -27,7 +27,7 @@ export function validateContainerConfig(config) {
   if (typeof email !== "string" || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim()))
     errors.push("Set BOOTSTRAP_ADMIN_EMAIL to the intended administrator email.");
   const bindings = config?.durable_objects?.bindings;
-  if (config?.main !== "container-worker.mjs" || !Array.isArray(bindings) ||
+  if (config?.main !== "cloudflare/container-worker.mjs" || !Array.isArray(bindings) ||
       !bindings.some(item => item?.name === "APP_CONTAINER" && item?.class_name === "OpenTerminalContainer"))
     errors.push("The container Worker and its Durable Object binding are required.");
   if (!Array.isArray(config?.secrets?.required) || !requiredSecrets.every(name => config.secrets.required.includes(name)))
@@ -38,7 +38,7 @@ export function validateContainerConfig(config) {
 async function main() {
   let config;
   try {
-    config = JSON.parse(await readFile(new URL("./wrangler.container-deploy.jsonc", import.meta.url), "utf8"));
+    config = JSON.parse(await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
   } catch {
     console.error("Cannot read the container deployment configuration.");
     process.exitCode = 1;
