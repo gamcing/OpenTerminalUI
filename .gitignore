@@ -92,3 +92,7 @@ frontend/public/landing/uploads/
 .vite/
 # Local JWT used by scripts/capture_*.mjs
 .ot-token
+
+# Cloudflare local state
+.wrangler/
+.codex_tmp_d1/

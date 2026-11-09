@@ -1,0 +1,52 @@
+# Cloudflare frontend deployment (partial)
+
+This configuration deploys the frontend and a same-origin API proxy to Cloudflare Workers. It requires an **existing HTTPS OpenTerminalUI backend**. It does not deploy the Python backend, provision a database, or store application data in Cloudflare D1. This is not a complete one-click Cloudflare deployment.
+
+## Requirements
+
+- A Cloudflare account with Workers enabled and Node.js 20 or later.
+- An existing OpenTerminalUI backend with persistent storage, served over HTTPS. Configure production secrets and authentication on the backend before exposing it to the internet.
+- Access to deploy Workers with Wrangler.
+
+## Deploy
+
+From the repository root:
+
+```sh
+npm run build
+npx wrangler@4 login
+npx wrangler@4 deploy --var BACKEND_ORIGIN:https://backend.example.com
+```
+
+Replace `https://backend.example.com` with the backend origin (scheme and host, no path or trailing query). The origin must be HTTPS and must not be the Worker URL. API requests and WebSocket upgrades under `/api`, along with the backend health endpoints, are forwarded to this origin; all other requests are served from the built frontend. Requests to the backend fail with HTTP 503 if the origin is missing or invalid.
+
+For Git-connected Workers Builds, set the build command to `npm run build`, the deploy command to `npx wrangler@4 deploy`, and configure `BACKEND_ORIGIN` as a Worker variable in the dashboard. Keep its value when changing deployment methods: Wrangler configuration and dashboard environment-variable settings can override each other.
+
+The proxy does not authenticate or firewall the backend origin. Secure the backend itself and restrict direct origin access as appropriate for your setup. In particular, do not point it at a development backend with development authentication enabled.
+
+## Remaining work for a full Cloudflare deployment
+
+The FastAPI application uses SQLAlchemy sessions and local SQLite in multiple places. D1 cannot be substituted for these connections by changing a URL. A complete Cloudflare deployment needs a transaction-safe data-access migration, storage for durable files, a supported backend runtime, production secrets, and end-to-end tests covering restart and recovery. Do not place the existing SQLite databases on ephemeral container storage and treat them as durable.
+
+Run the proxy tests with `npm run test:cloudflare`. They do not test a real Cloudflare deployment or the Python backend.
+
+## Experimental D1 transaction gateway
+
+The D1 gateway (`d1-bridge.mjs`) and Python batch client (`backend/cloudflare/d1.py`) are migration building blocks only. The application does not use them yet, and the gateway is **not included in the production Worker configuration**. Do not deploy it as the application database until the data-access migration and security review are complete.
+
+The gateway accepts a complete set of precomputed statements and uses D1 `batch()` to execute them atomically. It cannot implement an interactive SQLAlchemy transaction or a read-dependent sequence of writes across requests. The client deliberately does not retry after a timeout or database error because the commit outcome may be unknown.
+
+To test against a disposable local D1 database, start this command in one terminal:
+
+```sh
+npx wrangler@4 dev --local --config cloudflare/wrangler.d1-test.jsonc --port 8899 --ip 127.0.0.1 --var D1_BRIDGE_TOKEN:test-secret-only-not-for-production-1234567890 --persist-to .codex_tmp_d1
+```
+
+In a second terminal, run:
+
+```sh
+node cloudflare/d1-local.integration.mjs
+python -m cloudflare.d1_local_integration
+```
+
+The fixed token is **only for local testing**. Any future deployed gateway must use an independently generated high-entropy secret, protect it as a Cloudflare secret, limit access to the backend, and avoid exposing arbitrary SQL execution to clients. The tests exercise local D1 and do not establish production durability, transactional compatibility of the application, or a complete deployment.
