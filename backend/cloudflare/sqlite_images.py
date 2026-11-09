@@ -1,9 +1,8 @@
-"""Experimental immutable SQLite images in D1; not connected to application commits.
+"""Experimental immutable SQLite images in D1 for local coordination tests.
 
-The caller must ensure exclusive control of the private D1 gateway. A successful
-publish only makes a complete image durable; it does not commit a SQLite
-transaction or provide an adapter for SQLAlchemy. Never retry a publish whose
-outcome is unknown without inspecting the current head.
+The caller must ensure exclusive control of the private D1 gateway. Publishing
+an image does not itself commit a local SQLite transaction. Never retry a
+publish whose outcome is unknown without inspecting the current head.
 """
 from __future__ import annotations
 
@@ -95,12 +94,25 @@ class D1SQLiteImageStore:
         chunks = []
         for ordinal in range(count):
             rows = self.client.batch([D1Statement(
-                "SELECT data_base64 FROM cf_sqlite_image_chunks WHERE image_id=? AND ordinal=?", [image_id, ordinal],
+                "SELECT c.data_base64 AS marker,p.data_base64 AS pooled FROM cf_sqlite_image_chunks c "
+                "JOIN cf_sqlite_images i ON i.id=c.image_id "
+                "LEFT JOIN cf_sqlite_chunk_pool p ON p.database_name=i.database_name "
+                "AND p.sha256=substr(c.data_base64,2) AND substr(c.data_base64,1,1)='@' "
+                "WHERE c.image_id=? AND c.ordinal=?", [image_id, ordinal],
             )])[0].get("results")
             if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
                 raise D1BatchOutcomeUnknown("incomplete SQLite image")
             try:
-                raw = base64.b64decode(rows[0]["data_base64"], validate=True)
+                marker = rows[0]["marker"]
+                if not isinstance(marker, str):
+                    raise ValueError
+                chunk_digest = marker[1:] if marker.startswith("@") else None
+                if chunk_digest is not None and not re.fullmatch(r"[0-9a-f]{64}", chunk_digest):
+                    raise ValueError
+                encoded = rows[0]["pooled"] if chunk_digest is not None else marker
+                raw = base64.b64decode(encoded, validate=True)
+                if chunk_digest is not None and hashlib.sha256(raw).hexdigest() != chunk_digest:
+                    raise ValueError
             except (ValueError, TypeError, KeyError):
                 raise D1BatchOutcomeUnknown("invalid SQLite image chunk") from None
             expected = min(_CHUNK_SIZE, size - ordinal * _CHUNK_SIZE)
@@ -163,10 +175,24 @@ class D1SQLiteImageStore:
         ])
         for ordinal in range(count):
             chunk = image[ordinal * _CHUNK_SIZE:(ordinal + 1) * _CHUNK_SIZE]
-            self.client.batch([D1Statement(
+            chunk_digest = hashlib.sha256(chunk).hexdigest()
+            rows = self.client.batch([D1Statement(
+                "SELECT 1 AS present FROM cf_sqlite_chunk_pool WHERE database_name=? AND sha256=?",
+                [name, chunk_digest],
+            )])[0].get("results")
+            if rows not in ([], [{"present": 1}]):
+                raise D1BatchOutcomeUnknown("invalid SQLite chunk lookup")
+            statements = [D1Statement(
                 "INSERT INTO cf_sqlite_image_chunks (image_id,ordinal,data_base64) VALUES (?,?,?)",
-                [image_id, ordinal, base64.b64encode(chunk).decode("ascii")],
-            )])
+                [image_id, ordinal, "@" + chunk_digest],
+            )]
+            if not rows:
+                statements.append(D1Statement(
+                    "INSERT INTO cf_sqlite_chunk_pool (database_name,sha256,data_base64) VALUES (?,?,?) "
+                    "ON CONFLICT(database_name,sha256) DO NOTHING",
+                    [name, chunk_digest, base64.b64encode(chunk).decode("ascii")],
+                ))
+            self.client.batch(statements)
         # Check the actual stored bytes before the final transaction publishes them.
         if self._read_chunks(image_id, count, len(image), digest) != image:
             raise D1BatchOutcomeUnknown("SQLite image verification failed")

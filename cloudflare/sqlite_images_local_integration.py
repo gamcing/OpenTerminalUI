@@ -11,7 +11,8 @@ from backend.cloudflare.d1 import D1BatchClient, D1BatchOutcomeUnknown, D1Statem
 from backend.cloudflare.sqlite_images import D1SQLiteImageStore, capture_sqlite_image
 
 client = D1BatchClient("http://127.0.0.1:8899", "test-secret-only-not-for-production-1234567890", allow_insecure_localhost=True)
-schema = Path("cloudflare/migrations/0009_sqlite_image_storage.sql").read_text(encoding="utf-8")
+schema = (Path("cloudflare/migrations/0009_sqlite_image_storage.sql").read_text(encoding="utf-8")
+          + Path("cloudflare/migrations/0010_sqlite_chunk_pool.sql").read_text(encoding="utf-8"))
 statements, pending = [], ""
 for line in schema.splitlines(keepends=True):
     pending += line
@@ -58,6 +59,100 @@ with tempfile.TemporaryDirectory() as temp:
 key = name + "-WAL"
 original = store.head(key)
 assert original
+
+# Reuse identical chunks within one database, and upload only changed chunks.
+dedup_key = name + "-dedup"
+class CountingClient:
+    def __init__(self): self.uploads = 0
+    def batch(self, statements):
+        self.uploads += sum("INSERT INTO cf_sqlite_chunk_pool" in statement.sql for statement in statements)
+        return client.batch(statements)
+counter = CountingClient()
+dedup = D1SQLiteImageStore(counter)
+first = str(uuid4())
+dedup.stage(dedup_key, 0, first, original.data)
+first_uploads = counter.uploads
+assert first_uploads > 1
+assert dedup.publish(dedup_key, 0, first) == 1
+identical = str(uuid4())
+dedup.stage(dedup_key, 1, identical, original.data)
+assert counter.uploads == first_uploads
+assert dedup.publish(dedup_key, 1, identical) == 2
+changed_db = sqlite3.connect(":memory:")
+changed_db.deserialize(original.data)
+changed_db.execute("UPDATE entries SET value='changed' WHERE id=1")
+changed_db.commit()
+changed_image = capture_sqlite_image(changed_db)
+changed_db.close()
+changed = str(uuid4())
+dedup.stage(dedup_key, 2, changed, changed_image)
+assert 0 < counter.uploads - first_uploads < first_uploads
+assert dedup.publish(dedup_key, 2, changed) == 3
+assert dedup.head(dedup_key).data == changed_image
+
+# A separate logical database cannot reuse another database's pooled chunks.
+other_counter = CountingClient()
+D1SQLiteImageStore(other_counter).stage(name + "-separate", 0, str(uuid4()), original.data)
+assert other_counter.uploads == first_uploads
+
+# Concurrent stages can race to insert the same new pooled content.
+race_key = name + "-pool-race"
+race_ids = [str(uuid4()), str(uuid4())]
+with ThreadPoolExecutor(max_workers=2) as pool:
+    list(pool.map(lambda run: store.stage(race_key, 0, run, original.data), race_ids))
+assert store.publish(race_key, 0, race_ids[0]) == 1
+assert store.head(race_key).data == original.data
+store.abort(race_ids[1])
+
+# Existing 0009 inline images remain readable and publishable.
+legacy_key, legacy_id = name + "-legacy", str(uuid4())
+from backend.cloudflare.sqlite_images import _CHUNK_SIZE
+legacy_chunks = [original.data[i:i + _CHUNK_SIZE] for i in range(0, len(original.data), _CHUNK_SIZE)]
+client.batch([D1Statement(
+    "INSERT INTO cf_sqlite_images (id,database_name,parent_revision,byte_count,chunk_count,sha256) VALUES (?,?,?,?,?,?)",
+    [legacy_id, legacy_key, 0, len(original.data), len(legacy_chunks), hashlib.sha256(original.data).hexdigest()],
+)])
+for ordinal, chunk in enumerate(legacy_chunks):
+    client.batch([D1Statement("INSERT INTO cf_sqlite_image_chunks VALUES (?,?,?)",
+                              [legacy_id, ordinal, base64.b64encode(chunk).decode("ascii")])])
+assert store.publish(legacy_key, 0, legacy_id) == 1
+assert store.head(legacy_key).data == original.data
+
+pool_row = client.batch([D1Statement(
+    "SELECT sha256 FROM cf_sqlite_chunk_pool WHERE database_name=? LIMIT 1", [dedup_key],
+)])[0]["results"][0]
+for statement in (
+    D1Statement("UPDATE cf_sqlite_chunk_pool SET data_base64='bad' WHERE database_name=? AND sha256=?",
+                [dedup_key, pool_row["sha256"]]),
+    D1Statement("DELETE FROM cf_sqlite_chunk_pool WHERE database_name=? AND sha256=?",
+                [dedup_key, pool_row["sha256"]]),
+    D1Statement("INSERT OR REPLACE INTO cf_sqlite_chunk_pool VALUES (?,?,?)",
+                [dedup_key, pool_row["sha256"], "bad"]),
+):
+    try:
+        client.batch([statement])
+    except D1BatchOutcomeUnknown:
+        pass
+    else:
+        raise AssertionError("pooled chunks must be immutable")
+assert dedup.head(dedup_key).data == changed_image
+
+# A missing pool reference must not become a published image.
+bad_id = str(uuid4())
+client.batch([
+    D1Statement("INSERT INTO cf_sqlite_images (id,database_name,parent_revision,byte_count,chunk_count,sha256) VALUES (?,?,?,?,?,?)",
+                [bad_id, dedup_key, 3, len(changed_image), len(legacy_chunks), hashlib.sha256(changed_image).hexdigest()]),
+    D1Statement("INSERT INTO cf_sqlite_image_chunks VALUES (?,?,?)", [bad_id, 0, "@" + "f" * 64]),
+])
+try:
+    store.publish(dedup_key, 3, bad_id)
+except D1BatchOutcomeUnknown:
+    pass
+else:
+    raise AssertionError("missing pooled chunk must fail")
+store.abort(bad_id)
+assert dedup.head(dedup_key).data == changed_image
+
 # Two complete snapshots of the same base revision must have one winner.
 runs = [str(uuid4()), str(uuid4())]
 for run in runs:
