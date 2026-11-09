@@ -2,6 +2,7 @@
   "name": "openterminalui-container-test",
   "main": "container-worker.mjs",
   "compatibility_date": "2026-11-09",
+  "triggers": { "crons": [ "*/5 * * * *" ] },
   "containers": [
     { "class_name": "OpenTerminalContainer", "scheduling_policy": "durable_object", "images": { "base": { "dockerfile": "../Dockerfile", "build_context": ".." } } }
   ],

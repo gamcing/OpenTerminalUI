@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { BACKEND_PORT, ContainerRuntime, D1_INTERNAL_HOST, INACTIVITY_TIMEOUT_MS, containerEnvironment } from "./container-runtime.mjs";
+import { BACKEND_PORT, ContainerRuntime, D1_INTERNAL_HOST, INACTIVITY_TIMEOUT_MS, containerEnvironment, keepScheduledContainerWarm } from "./container-runtime.mjs";
 
 function setup({ initiallyRunning = false, probeFailures = 0, failIntercept = false } = {}) {
   const events = [];
@@ -70,4 +70,36 @@ test("restores a running container without starting another one", async () => {
 
 test("does not allow a binding to override production mode", () => {
   assert.equal(containerEnvironment({ OPENTERMINALUI_ENV: "development" }).OPENTERMINALUI_ENV, "production");
+});
+
+
+test("scheduled keepalive is disabled unless explicitly enabled", async () => {
+  let calls = 0;
+  const env = { APP_CONTAINER: { getByName() { calls++; throw Error("must not start"); } } };
+  assert.equal(await keepScheduledContainerWarm(env), false);
+  assert.equal(await keepScheduledContainerWarm({ ...env, OPENTERMINALUI_CF_KEEPALIVE: "true" }), false);
+  assert.equal(calls, 0);
+});
+
+test("scheduled keepalive reaches the traffic singleton and reports failures", async () => {
+  const names = [];
+  let wakes = 0;
+  const env = { OPENTERMINALUI_CF_KEEPALIVE: "1", APP_CONTAINER: { getByName(name) {
+    names.push(name);
+    return { async keepAlive() { wakes++; } };
+  } } };
+  assert.equal(await keepScheduledContainerWarm(env), true);
+  assert.deepEqual(names, ["singleton"]);
+  assert.equal(wakes, 1);
+  env.APP_CONTAINER.getByName = () => ({ async keepAlive() { throw Error("startup failed"); } });
+  await assert.rejects(keepScheduledContainerWarm(env), /startup failed/);
+});
+
+test("scheduled and foreground activity share container startup", async () => {
+  const { events, runtime } = setup({ probeFailures: 1 });
+  const env = { OPENTERMINALUI_CF_KEEPALIVE: "1", APP_CONTAINER: { getByName() {
+    return { keepAlive: () => runtime.ensureReady() };
+  } } };
+  await Promise.all([keepScheduledContainerWarm(env), runtime.fetch(new Request("https://example.com/api/one"))]);
+  assert.equal(events.filter(e => e[0] === "start").length, 1);
 });

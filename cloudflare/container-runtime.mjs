@@ -15,6 +15,14 @@ const forwardedSettings = [
   "OPENTERMINALUI_PREFETCH_ENABLED", "OPENTERMINALUI_CORS_ORIGINS", "OPENTERMINALUI_SAVED_VIEWS_STORE",
 ];
 
+// Explicit opt-in: keeping a container warm incurs continuous compute charges.
+// A scheduled invocation only wakes the same singleton used for user traffic.
+export async function keepScheduledContainerWarm(env) {
+  if (env.OPENTERMINALUI_CF_KEEPALIVE !== "1") return false;
+  await env.APP_CONTAINER.getByName("singleton").keepAlive();
+  return true;
+}
+
 export function containerEnvironment(env) {
   const result = {
     OPENTERMINALUI_ENV: "production",

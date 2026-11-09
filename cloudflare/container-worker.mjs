@@ -1,5 +1,5 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
-import { ContainerRuntime } from "./container-runtime.mjs";
+import { ContainerRuntime, keepScheduledContainerWarm } from "./container-runtime.mjs";
 import { handleD1Bridge } from "./d1-bridge.mjs";
 
 // This named entrypoint is only reachable through the container's outbound
@@ -16,9 +16,16 @@ export class OpenTerminalContainer extends DurableObject {
   }
 
   fetch(request) { return this.runtime.fetch(request); }
+
+  // Internal RPC, reachable only through the Durable Object binding.
+  async keepAlive() { await this.runtime.ensureReady(); }
 }
 
 export default {
+  scheduled(_controller, env, ctx) {
+    // Preserve the rejection in Workers observability; the next cron run retries.
+    ctx.waitUntil(keepScheduledContainerWarm(env));
+  },
   fetch(request, env) {
     // The singleton ensures that requests share one backend instance.
     return env.APP_CONTAINER.getByName("singleton").fetch(request);
