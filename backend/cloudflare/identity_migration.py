@@ -22,6 +22,7 @@ _COLUMNS = {
     "saved_views": ("id", "user_id", "name", "scope", "page", "payload_json", "description", "created_at", "updated_at"),
     "api_keys": ("id", "user_id", "name", "key_prefix", "key_hash", "permissions", "is_active", "last_used_at", "created_at"),
     "watchlists": ("id", "user_id", "name", "symbols_json", "column_config_json", "created_at"),
+    "user_layouts": ("id", "user_key", "layouts_json", "updated_at"),
 }
 _DATE_FIELDS = {"created_at", "updated_at", "last_login", "expires_at", "revoked_at", "last_used_at"}
 
@@ -35,6 +36,7 @@ class IdentitySnapshot:
     saved_views: list[list[Any]] = field(repr=False)
     api_keys: list[list[Any]] = field(default_factory=list, repr=False)
     watchlists: list[list[Any]] = field(default_factory=list, repr=False)
+    user_layouts: list[list[Any]] = field(default_factory=list, repr=False)
 
 
 def _timestamp(value: Any) -> str:
@@ -64,12 +66,15 @@ def read_identity_snapshot(connection: Connection) -> IdentitySnapshot:
                 value = row[column]
                 if column in _DATE_FIELDS and value is not None:
                     value = _timestamp(value)
-                elif column in {"payload_json", "symbols_json", "column_config_json"}:
+                elif column in {"payload_json", "symbols_json", "column_config_json", "layouts_json"}:
                     if isinstance(value, str):
                         value = json.loads(value)
                     if column == "symbols_json":
                         if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                             raise ValueError("source watchlist symbols must be a string array")
+                    elif column == "layouts_json":
+                        if not isinstance(value, list):
+                            raise ValueError("source layouts must be an array")
                     elif not isinstance(value, dict):
                         raise ValueError("source JSON field must be an object")
                     value = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
@@ -105,6 +110,7 @@ def import_identity_snapshot(client: D1BatchClient, snapshot: IdentitySnapshot) 
         "SELECT CASE WHEN EXISTS(SELECT 1 FROM users) "
         "OR EXISTS(SELECT 1 FROM refresh_tokens) OR EXISTS(SELECT 1 FROM saved_views) "
         "OR EXISTS(SELECT 1 FROM api_keys) OR EXISTS(SELECT 1 FROM watchlists) "
+        "OR EXISTS(SELECT 1 FROM user_layouts) "
         "THEN json('target tables are not empty') ELSE 1 END"
     )]
     expected = {}

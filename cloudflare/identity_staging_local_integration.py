@@ -10,7 +10,7 @@ from backend.cloudflare.identity_migration import IdentitySnapshot
 from backend.cloudflare.identity_staging import abort_identity_snapshot, finalize_identity_snapshot, stage_identity_snapshot
 
 client = D1BatchClient("http://127.0.0.1:8899", "test-secret-only-not-for-production-1234567890", allow_insecure_localhost=True)
-for migration in ("0001_identity_saved_views.sql", "0002_identity_import_staging.sql", "0003_identity_import_sealing.sql", "0004_api_keys.sql", "0005_api_key_import_staging.sql", "0006_watchlists.sql", "0007_watchlist_import_staging.sql"):
+for migration in ("0001_identity_saved_views.sql", "0002_identity_import_staging.sql", "0003_identity_import_sealing.sql", "0004_api_keys.sql", "0005_api_key_import_staging.sql", "0006_watchlists.sql", "0007_watchlist_import_staging.sql", "0008_user_layouts.sql"):
     if migration.startswith(("0003", "0005", "0007")):
         columns = client.batch([D1Statement("PRAGMA table_info(cf_identity_import_runs)")])[0]["results"]
         marker = "sealed" if migration.startswith("0003") else ("api_keys_count" if migration.startswith("0005") else "manifest_json")
@@ -25,7 +25,7 @@ for migration in ("0001_identity_saved_views.sql", "0002_identity_import_staging
             statements.append(D1Statement(pending.strip()))
             pending = ""
     assert not pending.strip(), "incomplete migration statement"
-    if migration.startswith(("0005", "0007")):
+    if migration.startswith(("0005", "0007", "0008")):
         pending_id = str(uuid4())
         client.batch([D1Statement("INSERT INTO cf_identity_import_runs (id,snapshot_sha256,users_count,refresh_tokens_count,saved_views_count) VALUES (?,?,?,?,?)",
                                    [pending_id, "pending", 0, 0, 0])])
@@ -35,15 +35,17 @@ for migration in ("0001_identity_saved_views.sql", "0002_identity_import_staging
             pass
         else:
             raise AssertionError("staging migration must reject unfinished runs")
-        columns = client.batch([D1Statement("PRAGMA table_info(cf_identity_import_runs)")])[0]["results"]
-        assert not any(column["name"] == marker for column in columns)
+        if not migration.startswith("0008"):
+            columns = client.batch([D1Statement("PRAGMA table_info(cf_identity_import_runs)")])[0]["results"]
+            assert not any(column["name"] == marker for column in columns)
         client.batch([D1Statement("DELETE FROM cf_identity_import_runs WHERE id=?", [pending_id])])
     client.batch(statements)
-client.batch([D1Statement("DELETE FROM users"), D1Statement("DELETE FROM cf_identity_import_runs")])
+client.batch([D1Statement("DELETE FROM users"), D1Statement("DELETE FROM user_layouts"), D1Statement("DELETE FROM cf_identity_import_runs")])
 now = "2026-01-02 03:04:05.123456"
 user = ["u1", "alice@example.test", "hash", "ADMIN", now, None]
 token = ["t1", "u1", "secret-jti", now, now, None]
 api_key = [7, "u1", "existing", "otui_abcdefg", "a" * 64, "read_write", 1, None, now]
+layout = ["l1", "anonymous", '[{"name":"layout"}]', now]
 watchlist = ["w1", "u1", "existing list", '["AAPL","TSLA"]', '{"columns":["price"]}', now]
 # Oversized individual rows are rejected before staging is created.
 large_row = IdentitySnapshot(users=[user, ["u2", "b@example.test", "x" * (800 * 1024), "VIEWER", now, None]],
@@ -61,15 +63,16 @@ assert client.batch([D1Statement("SELECT COUNT(*) AS n FROM cf_identity_import_r
 payload = json.dumps({"text": "条件\\\"😀" * 800}, ensure_ascii=False)
 views = [[f"v{i}", "u1", f"view {i}", "workspace", "/x", payload, "", now, now] for i in range(150)]
 assert sum(len(json.dumps(row, ensure_ascii=False).encode("utf-8")) for row in views) > 1024 * 1024
-snapshot = IdentitySnapshot(users=[user], refresh_tokens=[token], saved_views=views, api_keys=[api_key], watchlists=[watchlist])
+snapshot = IdentitySnapshot(users=[user], refresh_tokens=[token], saved_views=views, api_keys=[api_key], watchlists=[watchlist], user_layouts=[layout])
 run = str(uuid4())
-assert stage_identity_snapshot(client, run, snapshot) == {"users": 1, "refresh_tokens": 1, "saved_views": len(views), "api_keys": 1, "watchlists": 1}
-results = client.batch([D1Statement("SELECT COUNT(*) AS n FROM " + table) for table in ("users", "refresh_tokens", "saved_views", "api_keys", "watchlists")])
+assert stage_identity_snapshot(client, run, snapshot) == {"users": 1, "refresh_tokens": 1, "saved_views": len(views), "api_keys": 1, "watchlists": 1, "user_layouts": 1}
+results = client.batch([D1Statement("SELECT COUNT(*) AS n FROM " + table) for table in ("users", "refresh_tokens", "saved_views", "api_keys", "watchlists", "user_layouts")])
 assert all(result["results"][0]["n"] == 0 for result in results)
 assert finalize_identity_snapshot(client, run, snapshot)["saved_views"] == len(views)
 rows = client.batch([D1Statement("SELECT payload_json FROM saved_views WHERE id = ?", ["v149"]),
                      D1Statement("SELECT COUNT(*) AS n FROM cf_identity_import_rows")])
 assert json.loads(rows[0]["results"][0]["payload_json"]) == json.loads(payload)
+assert json.loads(client.batch([D1Statement("SELECT layouts_json FROM user_layouts WHERE id='l1'")])[0]["results"][0]["layouts_json"]) == [{"name": "layout"}]
 assert rows[1]["results"][0]["n"] == 0
 migrated_key = client.batch([D1Statement("SELECT key_hash,permissions FROM api_keys WHERE id=7")])[0]["results"]
 assert migrated_key == [{"key_hash": "a" * 64, "permissions": "read_write"}]
@@ -83,8 +86,8 @@ except D1BatchOutcomeUnknown:
     pass
 else:
     raise AssertionError("staging must reject a nonempty target")
-client.batch([D1Statement("DELETE FROM users")])
-small = IdentitySnapshot(users=[user], refresh_tokens=[token], saved_views=[views[0]], api_keys=[api_key], watchlists=[watchlist])
+client.batch([D1Statement("DELETE FROM users"), D1Statement("DELETE FROM user_layouts")])
+small = IdentitySnapshot(users=[user], refresh_tokens=[token], saved_views=[views[0]], api_keys=[api_key], watchlists=[watchlist], user_layouts=[layout])
 
 # An interrupted upload stays unsealed and cannot be finalized.
 class InterruptedUpload:
@@ -142,7 +145,7 @@ assert client.batch([D1Statement("SELECT sealed FROM cf_identity_import_runs WHE
 abort_identity_snapshot(client, run)
 
 # Modifying the source while it is uploaded cannot produce a sealed mixed snapshot.
-mutable = IdentitySnapshot(users=[user.copy()], refresh_tokens=[token.copy()], saved_views=[views[0].copy()], api_keys=[api_key.copy()], watchlists=[watchlist.copy()])
+mutable = IdentitySnapshot(users=[user.copy()], refresh_tokens=[token.copy()], saved_views=[views[0].copy()], api_keys=[api_key.copy()], watchlists=[watchlist.copy()], user_layouts=[layout.copy()])
 class MutatingUpload:
     def batch(self, statements):
         result = client.batch(statements)
@@ -203,7 +206,7 @@ abort_identity_snapshot(client, run)
 # Changed source snapshots must fail before cutover.
 run = str(uuid4())
 stage_identity_snapshot(client, run, small)
-changed = IdentitySnapshot(users=[user], refresh_tokens=[token], saved_views=[["changed", *views[0][1:]]], api_keys=[api_key], watchlists=[watchlist])
+changed = IdentitySnapshot(users=[user], refresh_tokens=[token], saved_views=[["changed", *views[0][1:]]], api_keys=[api_key], watchlists=[watchlist], user_layouts=[layout])
 try:
     finalize_identity_snapshot(client, run, changed)
 except D1BatchOutcomeUnknown:
@@ -215,7 +218,7 @@ abort_identity_snapshot(client, run)
 # A later insert failing rolls back both earlier application-table inserts and cleanup.
 run = str(uuid4())
 stage_identity_snapshot(client, run, small)
-client.batch([D1Statement("CREATE TRIGGER reject_staged_watchlists BEFORE INSERT ON watchlists BEGIN SELECT RAISE(ABORT, 'test'); END")])
+client.batch([D1Statement("CREATE TRIGGER reject_staged_layouts BEFORE INSERT ON user_layouts BEGIN SELECT RAISE(ABORT, 'test'); END")])
 try:
     try:
         finalize_identity_snapshot(client, run, small)
@@ -224,8 +227,8 @@ try:
     else:
         raise AssertionError("trigger should abort the final transaction")
 finally:
-    client.batch([D1Statement("DROP TRIGGER reject_staged_watchlists")])
-results = client.batch([D1Statement("SELECT COUNT(*) AS n FROM " + table) for table in ("users", "refresh_tokens", "saved_views", "api_keys", "watchlists")])
+    client.batch([D1Statement("DROP TRIGGER reject_staged_layouts")])
+results = client.batch([D1Statement("SELECT COUNT(*) AS n FROM " + table) for table in ("users", "refresh_tokens", "saved_views", "api_keys", "watchlists", "user_layouts")])
 assert all(result["results"][0]["n"] == 0 for result in results)
 assert client.batch([D1Statement("SELECT COUNT(*) AS n FROM cf_identity_import_runs WHERE id=?", [run])])[0]["results"][0]["n"] == 1
 abort_identity_snapshot(client, run)
@@ -242,8 +245,8 @@ def finalize(run):
         return False
 with ThreadPoolExecutor(max_workers=2) as pool:
     assert sorted(pool.map(finalize, runs)) == [False, True]
-results = client.batch([D1Statement("SELECT COUNT(*) AS n FROM " + table) for table in ("users", "refresh_tokens", "saved_views", "api_keys", "watchlists")])
-assert [item["results"][0]["n"] for item in results] == [1, 1, 1, 1, 1]
+results = client.batch([D1Statement("SELECT COUNT(*) AS n FROM " + table) for table in ("users", "refresh_tokens", "saved_views", "api_keys", "watchlists", "user_layouts")])
+assert [item["results"][0]["n"] for item in results] == [1, 1, 1, 1, 1, 1]
 for run in runs:
     abort_identity_snapshot(client, run)
 assert client.batch([D1Statement("SELECT COUNT(*) AS n FROM cf_identity_import_rows")])[0]["results"][0]["n"] == 0
