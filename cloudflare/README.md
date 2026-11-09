@@ -32,7 +32,7 @@ Run the proxy tests with `npm run test:cloudflare`. They do not test a real Clou
 
 ## Experimental D1 transaction gateway
 
-The D1 gateway (`d1-bridge.mjs`) and Python batch client (`backend/cloudflare/d1.py`) are migration building blocks only. The application does not use them yet, and the gateway is **not included in the production Worker configuration**. Do not deploy it as the application database until the data-access migration and security review are complete.
+The D1 gateway (`d1-bridge.mjs`) and Python batch client (`backend/cloudflare/d1.py`) are migration building blocks only. The saved-view integration is experimental and disabled by default; the gateway is **not included in the production Worker configuration**. Do not deploy it as the application database until the data-access migration and security review are complete.
 
 The gateway accepts a complete set of precomputed statements and uses D1 `batch()` to execute them atomically. It cannot implement an interactive SQLAlchemy transaction or a read-dependent sequence of writes across requests. The client deliberately does not retry after a timeout or database error because the commit outcome may be unknown.
 
@@ -47,9 +47,10 @@ In a second terminal, run:
 ```sh
 node cloudflare/d1-local.integration.mjs
 python -m cloudflare.d1_local_integration
+python -m cloudflare.identity_local_integration
 ```
 
-The fixed token is **only for local testing**. Any future deployed gateway must use an independently generated high-entropy secret, protect it as a Cloudflare secret, limit access to the backend, and avoid exposing arbitrary SQL execution to clients. The tests exercise local D1 and do not establish production durability, transactional compatibility of the application, or a complete deployment.
+The identity test deletes users from the local database; use an isolated disposable database. The identity repository is a standalone prototype and is not connected to authentication or authorization. The fixed token is **only for local testing**. Any future deployed gateway must use an independently generated high-entropy secret, protect it as a Cloudflare secret, limit access to the backend, and avoid exposing arbitrary SQL execution to clients. The tests exercise local D1 and do not establish production durability, transactional compatibility of the application, or a complete deployment.
 
 ## Experimental container runtime
 
