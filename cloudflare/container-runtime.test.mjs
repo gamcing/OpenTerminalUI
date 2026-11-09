@@ -2,12 +2,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { BACKEND_PORT, ContainerRuntime, D1_INTERNAL_HOST, R2_INTERNAL_HOST, INACTIVITY_TIMEOUT_MS, containerEnvironment, keepScheduledContainerWarm } from "./container-runtime.mjs";
 
-function setup({ initiallyRunning = false, probeFailures = 0, failIntercept = false, failHost = "" } = {}) {
+function setup({ initiallyRunning = false, probeFailures = 0, unhealthy = false, failIntercept = false, failHost = "" } = {}) {
   const events = [];
   const port = { async fetch(request) {
     const url = typeof request === "string" ? request : request.url;
     events.push(["fetch", url]);
     if (url === "http://container/health" && probeFailures-- > 0) throw Error("starting");
+    if (url === "http://container/health" && unhealthy) return new Response("unavailable", { status: 503 });
     return new Response(url === "http://container/health" ? "ok" : "backend response");
   } };
   const container = {
@@ -45,6 +46,14 @@ test("installs private D1 routing before starting and forwards the request", asy
   assert.equal(start.env.OPENTERMINALUI_BACKTEST_STORE, undefined);
   assert.equal(events.find(e => e[0] === "timeout")[1], INACTIVITY_TIMEOUT_MS);
   assert.equal(events.filter(e => e[0] === "fetch").at(-1)[1], "http://container/api/hello?q=1");
+});
+
+test("does not forward requests when the running container reports unhealthy", async () => {
+  const { events, runtime } = setup({ initiallyRunning: true, unhealthy: true });
+  await assert.rejects(runtime.fetch(new Request("https://example.com/api/one")), /did not become ready/);
+  assert.equal(events.filter(e => e[0] === "start").length, 0);
+  assert.equal(events.filter(e => e[0] === "fetch").length, 100);
+  assert.ok(events.filter(e => e[0] === "fetch").every(e => e[1] === "http://container/health"));
 });
 
 test("concurrent requests share a single startup", async () => {

@@ -33,6 +33,13 @@ def rows(engine):
     with engine.connect() as conn:
         return conn.execute(text("SELECT id,name FROM items ORDER BY id")).all()
 
+def assert_unhealthy(coordinator):
+    try:
+        coordinator.check()
+    except SnapshotCoordinatorError:
+        return
+    raise AssertionError("coordinator must report recovery required")
+
 with tempfile.TemporaryDirectory() as temp:
     root = Path(temp)
     def directory(name):
@@ -145,6 +152,7 @@ with tempfile.TemporaryDirectory() as temp:
     else:
         raise AssertionError("stale instance must refuse reads")
     first_engine.dispose()
+    assert_unhealthy(stale)
     stale_engine.dispose()
 
     # Two independent instances can stage the same revision, but D1 publishes
@@ -221,10 +229,12 @@ with tempfile.TemporaryDirectory() as temp:
         pass
     else:
         raise AssertionError("old engine must be poisoned")
+    assert_unhealthy(uncertain)
     uncertain_engine.dispose()
     recovered = SQLiteSnapshotCoordinator(store, key, directory("recovered"))
     recovered_engine = recovered.create_engine()
     assert rows(recovered_engine) == current_rows + [(5, "unknown")]
+    recovered.check()
     recovered_engine.dispose()
 
     # An error during the local commit after remote publication has the same
@@ -246,6 +256,7 @@ with tempfile.TemporaryDirectory() as temp:
         pass
     else:
         raise AssertionError("local commit failure must poison the engine")
+    assert_unhealthy(broken)
     broken_engine.dispose()
     final = SQLiteSnapshotCoordinator(store, key, directory("final"))
     final_engine = final.create_engine()
