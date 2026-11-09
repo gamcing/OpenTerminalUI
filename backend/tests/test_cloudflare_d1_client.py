@@ -37,6 +37,11 @@ class BatchClientTest(unittest.TestCase):
         D1BatchClient("http://127.0.0.1:8899", TOKEN, allow_insecure_localhost=True)
         with self.assertRaises(ValueError):
             D1BatchClient("http://remote.example", TOKEN, allow_insecure_localhost=True)
+        D1BatchClient("http://openterminal-d1.internal", TOKEN, allow_intercepted_container_origin=True)
+        with self.assertRaises(ValueError):
+            D1BatchClient("http://openterminal-d1.internal", TOKEN)
+        with self.assertRaises(ValueError):
+            D1BatchClient("http://remote.example", TOKEN, allow_intercepted_container_origin=True)
 
     def test_no_retry_on_failed_or_ambiguous_response(self):
         seen = []

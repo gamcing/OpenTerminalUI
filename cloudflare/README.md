@@ -50,3 +50,11 @@ python -m cloudflare.d1_local_integration
 ```
 
 The fixed token is **only for local testing**. Any future deployed gateway must use an independently generated high-entropy secret, protect it as a Cloudflare secret, limit access to the backend, and avoid exposing arbitrary SQL execution to clients. The tests exercise local D1 and do not establish production durability, transactional compatibility of the application, or a complete deployment.
+
+## Experimental container runtime
+
+`container-worker.mjs` and `wrangler.container-test.jsonc` are an isolated runtime prototype, not the production configuration. The singleton Durable Object starts the existing Docker image and forwards HTTP requests. Before starting, it installs an outbound HTTP intercept for `openterminal-d1.internal` pointing to a private Worker entrypoint. The D1 gateway remains unavailable from the public Worker routes. The Python client permits this HTTP origin only when the caller explicitly enables `allow_intercepted_container_origin`; that option is safe only inside a container whose intercept has been installed successfully.
+
+The runtime uses a paid `standard-1` container and will stop after 30 minutes of inactivity. Background schedulers therefore do not yet have continuous execution guarantees. There is no D1 integration in the application database layer yet; in particular the existing production backend still expects PostgreSQL. Do not use this configuration as a complete deployment.
+
+The runtime unit tests use a simulated container API. A complete verification still requires building the Dockerfile, launching the real container, testing private egress and WebSocket behavior, and validating the migrated application data and scheduler after restarts. Building the Dockerfile locally requires a running Docker-compatible engine; Cloudflare Workers Builds can build the image in CI.

@@ -48,11 +48,14 @@ class D1BatchClient:
         *,
         timeout: float = 30,
         allow_insecure_localhost: bool = False,
+        allow_intercepted_container_origin: bool = False,
         opener: Callable[..., Any] = _open,
     ) -> None:
         url = urlsplit(gateway_url)
         local_http = allow_insecure_localhost and url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1", "::1"}
-        if ((url.scheme != "https" and not local_http) or not url.hostname or url.username or url.password
+        intercepted = (allow_intercepted_container_origin and url.scheme == "http"
+                       and url.hostname == "openterminal-d1.internal" and url.port is None)
+        if ((url.scheme != "https" and not local_http and not intercepted) or not url.hostname or url.username or url.password
                 or url.query or url.fragment or url.path not in ("", "/")):
             raise ValueError("gateway_url must be an HTTPS origin")
         if len(token) < 32:
