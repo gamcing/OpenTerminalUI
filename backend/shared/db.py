@@ -9,22 +9,28 @@ from sqlalchemy import text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from backend.db.base import get_sync_database_url
+from backend.cloudflare.snapshot_storage import local_snapshot_storage_from_env
 from backend.shared.sqlite_utils import configure_sqlite_connection
 
-database_url = get_sync_database_url()
-connect_args = {"check_same_thread": False, "timeout": 15} if database_url.startswith("sqlite") else {}
-engine = create_engine(
-    database_url,
-    connect_args=connect_args,
-    pool_pre_ping=True,
-)
+snapshot_storage = local_snapshot_storage_from_env()
+if snapshot_storage is None:
+    database_url = get_sync_database_url()
+    connect_args = {"check_same_thread": False, "timeout": 15} if database_url.startswith("sqlite") else {}
+    engine = create_engine(
+        database_url,
+        connect_args=connect_args,
+        pool_pre_ping=True,
+    )
+else:
+    database_url = "sqlite://"  # the local test engine uses a private temporary path
+    engine = snapshot_storage.engine
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
 @event.listens_for(engine, "connect")
 def _set_sqlite_pragmas(dbapi_connection: object, connection_record: object) -> None:
-    if isinstance(dbapi_connection, sqlite3.Connection):
+    if snapshot_storage is None and isinstance(dbapi_connection, sqlite3.Connection):
         configure_sqlite_connection(dbapi_connection)
 
 

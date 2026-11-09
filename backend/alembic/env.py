@@ -7,14 +7,14 @@ from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from backend.db.base import get_database_url
-from backend.shared.db import Base
+from backend.shared.db import Base, engine, snapshot_storage
 from backend.db import models as _models  # noqa: F401
 
 config = context.config
 # Programmatic callers may supply an already configured synchronous connection.
 # The normal Alembic CLI continues to use the existing asynchronous engine.
 provided_connection = config.attributes.get("connection")
-if provided_connection is None:
+if provided_connection is None and snapshot_storage is None:
     config.set_main_option("sqlalchemy.url", get_database_url())
 
 if config.config_file_name is not None:
@@ -58,9 +58,14 @@ async def run_migrations_online() -> None:
 
 
 if context.is_offline_mode():
+    if snapshot_storage is not None or provided_connection is not None:
+        raise RuntimeError("Offline migrations cannot use a supplied database connection")
     run_migrations_offline()
 elif provided_connection is not None:
     do_run_migrations(provided_connection)
+elif snapshot_storage is not None:
+    with engine.begin() as connection:
+        do_run_migrations(connection)
 else:
     import asyncio
 
