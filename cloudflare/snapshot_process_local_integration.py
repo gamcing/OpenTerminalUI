@@ -242,7 +242,50 @@ def integration() -> None:
         assert not (root / "fallback.sqlite").exists()
         assert not (root / "cache.sqlite").exists(), "instrument services must not create a separate database"
         assert not list(root.glob("openterminalui-d1-local-*")), "temporary snapshots must be cleaned up"
-    print("D1 snapshot local mode: migrations, authenticated app, encrypted settings and restart verified")
+
+        # Simulate the container's private outbound intercept in every child
+        # process, including the real Alembic CLI and the application import.
+        # No real container or Cloudflare network is involved in this test.
+        (root / "sitecustomize.py").write_text("""
+import urllib.request
+from urllib.parse import urlsplit
+import backend.cloudflare.d1 as d1
+original = d1._open
+def intercepted(request, timeout):
+    url = urlsplit(request.full_url)
+    assert url.scheme == 'http' and url.netloc == 'openterminal-d1.internal'
+    forwarded = urllib.request.Request('http://127.0.0.1:8899' + url.path, data=request.data,
+                                       method=request.get_method(), headers=dict(request.header_items()))
+    return original(forwarded, timeout)
+d1.D1BatchClient.__init__.__kwdefaults__['opener'] = intercepted
+""", encoding="utf-8")
+        container_key = "container-simulation-" + str(uuid4())
+        env.update({
+            "PYTHONPATH": str(root) + os.pathsep + str(Path.cwd()),
+            "OPENTERMINALUI_ENV": "production", "OPENTERMINALUI_D1_LOCAL_TEST": "0",
+            "OPENTERMINALUI_CF_CONTAINER": "1", "OPENTERMINALUI_D1_CONTAINER_EXPERIMENT": "1",
+            "CACHE_SIGNING_KEY": "local-simulation-cache-signing-key-1234567890",
+            "OPENTERMINALUI_CACHE_DB": str(root / "rebuildable-cache.sqlite"),
+            "OPENTERMINALUI_D1_SNAPSHOT_NAME": container_key,
+            "D1_GATEWAY_URL": "http://openterminal-d1.internal",
+        })
+        for overrides in (
+            {"OPENTERMINALUI_D1_CONTAINER_EXPERIMENT": "0"},
+            {"OPENTERMINALUI_CF_CONTAINER": "0"},
+            {"D1_GATEWAY_URL": "http://openterminal-d1.internal:80"},
+            {"D1_GATEWAY_URL": "http://attacker.invalid"},
+        ):
+            run(["-c", "import backend.shared.db"], overrides=overrides, success=False)
+        assert store.head(container_key) is None
+        run(["-m", "alembic", "-c", "backend/alembic.ini", "upgrade", "head"])
+        run(["scripts/seed_admin.py"])
+        run(["-m", "cloudflare.snapshot_process_local_integration", "write"])
+        run(["-m", "cloudflare.snapshot_process_local_integration", "read"])
+        run(["-m", "cloudflare.snapshot_process_local_integration", "realapp"])
+        run(["-m", "cloudflare.snapshot_process_local_integration", "verify"])
+        assert not (root / "fallback.sqlite").exists()
+        assert not list(root.glob("openterminalui-d1-local-*"))
+    print("Local D1 snapshot: migrations, authenticated app, encrypted settings, restart and simulated container intercept verified")
 
 
 if __name__ == "__main__":

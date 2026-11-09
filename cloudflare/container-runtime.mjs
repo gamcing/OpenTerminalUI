@@ -33,6 +33,19 @@ export function containerEnvironment(env) {
   for (const name of forwardedSettings) {
     if (typeof env[name] === "string" && env[name] !== "") result[name] = env[name];
   }
+  if (env.OPENTERMINALUI_CF_D1_SNAPSHOT_EXPERIMENT === "1") {
+    if (!env.DB || typeof env.D1_BRIDGE_TOKEN !== "string" || env.D1_BRIDGE_TOKEN.length < 32 ||
+        typeof env.OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY !== "string" ||
+        env.OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY.length !== 44)
+      throw new Error("experimental D1 snapshot storage requires a database and separate secrets");
+    Object.assign(result, {
+      OPENTERMINALUI_DATABASE_STORE: "d1_snapshot",
+      OPENTERMINALUI_D1_SNAPSHOT_EXPERIMENT: "1",
+      OPENTERMINALUI_D1_CONTAINER_EXPERIMENT: "1",
+      OPENTERMINALUI_PROVIDER_KEYS_STORE: "database",
+      OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY: env.OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY,
+    });
+  }
   if (env.OPENTERMINALUI_CF_R2_EXPERIMENT === "1") {
     if (!env.BACKTESTS || typeof env.R2_BRIDGE_TOKEN !== "string" || env.R2_BRIDGE_TOKEN.length < 32)
       throw new Error("experimental R2 storage requires a bucket and gateway token");

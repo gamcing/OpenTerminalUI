@@ -80,6 +80,42 @@ test("restores a running container without starting another one", async () => {
   assert.equal(events.filter(e => e[0] === "monitor").length, 1);
 });
 
+test("explicit D1 snapshot experiment uses only the private gateway and durable settings", async () => {
+  const { events, runtime, env } = setup();
+  Object.assign(env, { OPENTERMINALUI_CF_D1_SNAPSHOT_EXPERIMENT: "1", DB: {},
+    D1_BRIDGE_TOKEN: "d".repeat(32), OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY: "k".repeat(44),
+    D1_GATEWAY_URL: "http://attacker.invalid", OPENTERMINALUI_DATABASE_STORE: "sqlalchemy" });
+  await runtime.fetch(new Request("https://example.com/api/one"));
+  assert.deepEqual(events.slice(0, 3).map(e => e[0]), ["intercept", "intercept", "start"]);
+  const config = events[2][1].env;
+  assert.equal(config.D1_GATEWAY_URL, `http://${D1_INTERNAL_HOST}`);
+  assert.equal(config.OPENTERMINALUI_DATABASE_STORE, "d1_snapshot");
+  assert.equal(config.OPENTERMINALUI_D1_SNAPSHOT_EXPERIMENT, "1");
+  assert.equal(config.OPENTERMINALUI_D1_CONTAINER_EXPERIMENT, "1");
+  assert.equal(config.OPENTERMINALUI_PROVIDER_KEYS_STORE, "database");
+  assert.equal(config.OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY, "k".repeat(44));
+});
+
+test("D1 experiment fails closed if a required binding, secret, or intercept is missing", async () => {
+  for (const missing of ["DB", "D1_BRIDGE_TOKEN", "OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY", "intercept"]) {
+    const { events, runtime, env } = setup({ failHost: missing === "intercept" ? D1_INTERNAL_HOST : "" });
+    Object.assign(env, { OPENTERMINALUI_CF_D1_SNAPSHOT_EXPERIMENT: "1", DB: {},
+      D1_BRIDGE_TOKEN: "d".repeat(32), OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY: "k".repeat(44) });
+    if (missing !== "intercept") delete env[missing];
+    await assert.rejects(runtime.fetch(new Request("https://example.com/")));
+    assert.equal(events.filter(e => e[0] === "start").length, 0);
+  }
+});
+
+test("worker environment cannot turn on the D1 adapter without its explicit switch", () => {
+  const config = containerEnvironment({ DB: {}, D1_BRIDGE_TOKEN: "d".repeat(32),
+    OPENTERMINALUI_DATABASE_STORE: "d1_snapshot", OPENTERMINALUI_D1_CONTAINER_EXPERIMENT: "1",
+    OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY: "k".repeat(44) });
+  assert.equal(config.OPENTERMINALUI_DATABASE_STORE, undefined);
+  assert.equal(config.OPENTERMINALUI_D1_CONTAINER_EXPERIMENT, undefined);
+  assert.equal(config.OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY, undefined);
+});
+
 test("installs both private intercepts before enabling experimental R2", async () => {
   const { events, runtime, env } = setup();
   Object.assign(env, { OPENTERMINALUI_CF_R2_EXPERIMENT: "1", BACKTESTS: {},

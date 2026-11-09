@@ -1,4 +1,4 @@
-"""Encrypted provider settings in the gated local D1 snapshot experiment."""
+"""Encrypted provider settings in the gated D1 snapshot experiments."""
 from __future__ import annotations
 
 import json
@@ -21,7 +21,7 @@ def database_keys_enabled() -> bool:
         raise RuntimeError("invalid provider key storage mode")
     from backend.shared.db import snapshot_storage
     if snapshot_storage is None:
-        raise RuntimeError("database provider keys are restricted to the local D1 snapshot experiment")
+        raise RuntimeError("database provider keys are restricted to D1 snapshot experiments")
     _fernet()  # Fail closed before accepting a configuration without a stable key.
     return True
 
