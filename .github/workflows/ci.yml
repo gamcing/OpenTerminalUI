@@ -88,6 +88,7 @@ jobs:
           python -m cloudflare.user_layouts_local_integration
           python -m cloudflare.sqlite_images_local_integration
           python -m cloudflare.sqlalchemy_sqlite_local_integration
+          python -m cloudflare.application_snapshot_local_integration
           python -m cloudflare.saved_views_local_integration
           python -m cloudflare.saved_views_api_local_integration
 

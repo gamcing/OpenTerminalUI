@@ -56,6 +56,7 @@ python -m cloudflare.identity_staging_local_integration
 python -m cloudflare.user_layouts_local_integration
 python -m cloudflare.sqlite_images_local_integration
 python -m cloudflare.sqlalchemy_sqlite_local_integration
+python -m cloudflare.application_snapshot_local_integration
 ```
 
 The identity tests delete users from the local database; use an isolated disposable database. D1 identity is connected to authentication and authorization only in explicitly enabled, loopback-only development tests; production use is rejected. The fixed token is **only for local testing**. Any future deployed gateway must use an independently generated high-entropy secret, protect it as a Cloudflare secret, limit access to the backend, and avoid exposing arbitrary SQL execution to clients. The tests exercise local D1 and do not establish production durability, transactional compatibility of the application, or a complete deployment.
@@ -118,3 +119,5 @@ The existing route stores an `anonymous` layout when no authenticated user is pr
 `backend/cloudflare/sqlalchemy_sqlite_prototype.py` tests one possible transaction coordinator against a private local SQLite file. It routes SQLAlchemy commits through immutable D1 images, checks the revision on transaction start, and refuses further operations after an uncertain remote publish or failed local commit. Its isolated integration test covers ORM writes, rollback, savepoints, deferred foreign keys, stale instances, concurrent writers, and recovery.
 
 This coordinator is **not connected to the application**. It requires every database operation to use its engine, relies on a fresh private working directory, and does not cover the existing direct SQLite connections, Alembic's separate process, container startup, background tasks, non-database files, automatic recovery or real Cloudflare behavior. Each write still stores a complete image and production contention, storage growth and latency remain unresolved. It is a feasibility prototype; do not enable it for live data.
+
+For integration testing, Alembic can accept an explicitly supplied synchronous SQLAlchemy connection through its programmatic configuration; its normal asynchronous CLI path remains unchanged. `cloudflare.application_snapshot_local_integration` runs the project's real migrations and model initialization against the prototype, seeds a test administrator, exercises real authentication and watchlist routes with unrelated fetcher dependencies isolated, then restores the data in a fresh local directory. This is targeted local verification, not a real container deployment or coverage of all application features.

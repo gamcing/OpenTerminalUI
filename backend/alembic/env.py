@@ -11,7 +11,11 @@ from backend.shared.db import Base
 from backend.db import models as _models  # noqa: F401
 
 config = context.config
-config.set_main_option("sqlalchemy.url", get_database_url())
+# Programmatic callers may supply an already configured synchronous connection.
+# The normal Alembic CLI continues to use the existing asynchronous engine.
+provided_connection = config.attributes.get("connection")
+if provided_connection is None:
+    config.set_main_option("sqlalchemy.url", get_database_url())
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -55,6 +59,8 @@ async def run_migrations_online() -> None:
 
 if context.is_offline_mode():
     run_migrations_offline()
+elif provided_connection is not None:
+    do_run_migrations(provided_connection)
 else:
     import asyncio
 
