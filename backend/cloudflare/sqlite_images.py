@@ -22,6 +22,16 @@ _NAME = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
 
 
 @dataclass(frozen=True)
+class SQLiteImageInfo:
+    database_name: str
+    revision: int
+    image_id: str
+    byte_count: int
+    chunk_count: int
+    sha256: str
+
+
+@dataclass(frozen=True)
 class SQLiteImage:
     database_name: str
     revision: int
@@ -102,7 +112,7 @@ class D1SQLiteImageStore:
             raise D1BatchOutcomeUnknown("SQLite image failed digest verification")
         return image
 
-    def head(self, database_name: str) -> SQLiteImage | None:
+    def head_info(self, database_name: str) -> SQLiteImageInfo | None:
         name = _name(database_name)
         rows = self.client.batch([D1Statement(
             "SELECT h.revision,i.id,i.byte_count,i.chunk_count,i.sha256 FROM cf_sqlite_heads h "
@@ -124,12 +134,18 @@ class D1SQLiteImageStore:
             _image_id(image_id)
         except (TypeError, KeyError, ValueError):
             raise D1BatchOutcomeUnknown("invalid SQLite image metadata") from None
-        image = self._read_chunks(image_id, count, size, digest)
+        return SQLiteImageInfo(name, revision, image_id, size, count, digest)
+
+    def head(self, database_name: str) -> SQLiteImage | None:
+        info = self.head_info(database_name)
+        if info is None:
+            return None
+        image = self._read_chunks(info.image_id, info.chunk_count, info.byte_count, info.sha256)
         try:
             _check_image(image)
         except ValueError:
             raise D1BatchOutcomeUnknown("invalid SQLite image") from None
-        return SQLiteImage(name, revision, image_id, image)
+        return SQLiteImage(info.database_name, info.revision, info.image_id, image)
 
     def stage(self, database_name: str, parent_revision: int, image_id: str, image: bytes) -> None:
         name = _name(database_name)
