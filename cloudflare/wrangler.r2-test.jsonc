@@ -1,0 +1,6 @@
+{
+  "name": "openterminalui-r2-test",
+  "main": "r2-bridge.mjs",
+  "compatibility_date": "2026-11-09",
+  "r2_buckets": [{ "binding": "BACKTESTS", "bucket_name": "openterminalui-backtests-test" }]
+}

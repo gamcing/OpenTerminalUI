@@ -94,6 +94,25 @@ jobs:
           python -m cloudflare.saved_views_local_integration
           python -m cloudflare.saved_views_api_local_integration
 
+      - name: Cloudflare local R2 integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          setsid npx --yes wrangler@4 dev --local --config cloudflare/wrangler.r2-test.jsonc \
+            --port 8900 --ip 127.0.0.1 \
+            --var R2_BRIDGE_TOKEN:test-secret-only-not-for-production-1234567890 \
+            --persist-to "$RUNNER_TEMP/openterminalui-r2" > "$RUNNER_TEMP/wrangler-r2.log" 2>&1 &
+          worker_pid=$!
+          trap 'kill -- -"$worker_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for i in {1..90}; do
+            if curl -s -o /dev/null http://127.0.0.1:8900/objects; then ready=1; break; fi
+            if ! kill -0 "$worker_pid" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          if [[ "$ready" != "1" ]]; then cat "$RUNNER_TEMP/wrangler-r2.log"; exit 1; fi
+          python -m cloudflare.r2_backtest_local_integration
+
       - name: Frontend build
         run: |
           cd frontend

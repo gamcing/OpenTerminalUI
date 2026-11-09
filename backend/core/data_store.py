@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+from io import BytesIO
 from typing import Any
 
 import pandas as pd
+
+from backend.cloudflare.r2_backtests import r2_backtest_store_from_env
 
 DATA_DIR = Path("data") / "backtest_store"
 PARQUET_DIR = DATA_DIR / "parquet"
@@ -16,10 +19,21 @@ def ensure_store() -> None:
 
 
 def write_equity_curve(run_id: str, equity_curve: list[dict[str, Any]]) -> dict[str, Any]:
-    ensure_store()
+    store = r2_backtest_store_from_env()
+    if store is None:
+        ensure_store()
     frame = pd.DataFrame(equity_curve)
     if frame.empty:
         return {"run_id": run_id, "rows": 0, "path": ""}
+    if store is not None:
+        output = BytesIO()
+        try:
+            frame.to_parquet(output, index=False)
+            content, extension = output.getvalue(), "parquet"
+        except Exception:
+            content, extension = frame.to_csv(index=False, lineterminator="\n").encode("utf-8"), "csv"
+        name = store.put(run_id, extension, content)
+        return {"run_id": run_id, "rows": len(frame), "path": "r2://backtests/" + name}
     out_path = PARQUET_DIR / f"{run_id}.parquet"
     try:
         frame.to_parquet(out_path, index=False)
@@ -31,6 +45,9 @@ def write_equity_curve(run_id: str, equity_curve: list[dict[str, Any]]) -> dict[
 
 
 def list_store_items() -> list[dict[str, Any]]:
+    store = r2_backtest_store_from_env()
+    if store is not None:
+        return store.list()
     ensure_store()
     items: list[dict[str, Any]] = []
     for path in sorted(PARQUET_DIR.glob("*")):
