@@ -57,6 +57,28 @@ jobs:
       - name: Cloudflare Worker tests
         run: npm run test:cloudflare
 
+      - name: Cloudflare local D1 integration
+        shell: bash
+        run: |
+          set -euo pipefail
+          setsid npx --yes wrangler@4 dev --local --config cloudflare/wrangler.d1-test.jsonc \
+            --port 8899 --ip 127.0.0.1 \
+            --var D1_BRIDGE_TOKEN:test-secret-only-not-for-production-1234567890 \
+            --persist-to "$RUNNER_TEMP/openterminalui-d1" > "$RUNNER_TEMP/wrangler-d1.log" 2>&1 &
+          worker_pid=$!
+          trap 'kill -- -"$worker_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for i in {1..90}; do
+            if curl -s -o /dev/null http://127.0.0.1:8899/batch; then ready=1; break; fi
+            if ! kill -0 "$worker_pid" 2>/dev/null; then break; fi
+            sleep 1
+          done
+          if [[ "$ready" != "1" ]]; then cat "$RUNNER_TEMP/wrangler-d1.log"; exit 1; fi
+          node cloudflare/d1-local.integration.mjs
+          python -m cloudflare.d1_local_integration
+          python -m cloudflare.saved_views_local_integration
+          python -m cloudflare.saved_views_api_local_integration
+
       - name: Frontend build
         run: |
           cd frontend

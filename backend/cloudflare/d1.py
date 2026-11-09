@@ -37,7 +37,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _open(request: urllib.request.Request, timeout: float):  # type: ignore[no-untyped-def]
-    return urllib.request.build_opener(_NoRedirect()).open(request, timeout=timeout)
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect()).open(request, timeout=timeout)
 
 
 class D1BatchClient:

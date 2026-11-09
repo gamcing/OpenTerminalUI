@@ -37,6 +37,7 @@ test("installs private D1 routing before starting and forwards the request", asy
   assert.equal(start.instance, "standard-1");
   assert.equal(start.enableInternet, true);
   assert.equal(start.env.OPENTERMINALUI_ENV, "production");
+  assert.equal(start.env.OPENTERMINALUI_CF_CONTAINER, "1");
   assert.equal(start.env.D1_GATEWAY_URL, `http://${D1_INTERNAL_HOST}`);
   assert.equal(start.env.UNRELATED_SECRET, undefined);
   assert.equal(events.find(e => e[0] === "timeout")[1], INACTIVITY_TIMEOUT_MS);

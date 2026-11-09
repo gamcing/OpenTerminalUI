@@ -58,3 +58,16 @@ The fixed token is **only for local testing**. Any future deployed gateway must 
 The runtime uses a paid `standard-1` container and will stop after 30 minutes of inactivity. Background schedulers therefore do not yet have continuous execution guarantees. There is no D1 integration in the application database layer yet; in particular the existing production backend still expects PostgreSQL. Do not use this configuration as a complete deployment.
 
 The runtime unit tests use a simulated container API. A complete verification still requires building the Dockerfile, launching the real container, testing private egress and WebSocket behavior, and validating the migrated application data and scheduler after restarts. Building the Dockerfile locally requires a running Docker-compatible engine; Cloudflare Workers Builds can build the image in CI.
+
+## Experimental saved-view migration
+
+The HTTP and MCP saved-view consumers have an opt-in D1 repository and an initial identity/saved-view schema in `migrations/0001_identity_saved_views.sql`. The default remains the original SQLAlchemy database. This is not a complete database migration: identity and every other application domain still use the original backend database, there is no automatic identity synchronization or import of existing saved views, and using separate stores can break referential integrity. **Do not enable the D1 saved-view flag for a live deployment.**
+
+For local development only, start the local D1 gateway above, then run:
+
+```sh
+python -m cloudflare.saved_views_local_integration
+python -m cloudflare.saved_views_api_local_integration
+```
+
+These tests reset the local test users and require an isolated disposable database. They exercise D1 schema creation, foreign keys, saved-view CRUD, HTTP routes, MCP reads and user isolation. Full deployment still requires identity migration, existing-data migration, the remaining application domains, durable files and end-to-end recovery checks.

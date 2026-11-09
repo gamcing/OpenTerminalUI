@@ -24,7 +24,9 @@ from __future__ import annotations
 from typing import Any
 
 from backend.agent.tools.envelope import cap, err, ok, project
+from backend.cloudflare.d1 import D1BatchError
 from backend.shared.db import SessionLocal
+from backend.saved_views.d1_storage import get_d1_saved_views
 
 # Recent-journal and active-alerts reads are capped tighter than the tool
 # default — these are context for a resource pull, not a paged listing.
@@ -112,7 +114,8 @@ def list_resources(user_id: str) -> list[dict[str, Any]]:
                 "mimeType": "application/json",
             })
 
-        saved_views = db.query(SavedViewORM).filter(SavedViewORM.user_id == user_id).all()
+        d1 = get_d1_saved_views()
+        saved_views = d1.list(user_id) if d1 is not None else db.query(SavedViewORM).filter(SavedViewORM.user_id == user_id).all()
         for v in saved_views:
             items.append({
                 "uri": f"otui://saved-view/{v.id}",
@@ -151,7 +154,10 @@ def read_resource(uri: str, user_id: str) -> dict[str, Any]:
             code="unknown_resource",
             hint="known kinds: watchlist, portfolio, saved-view, journal, alerts",
         )
-    return handler(rid, user_id)
+    try:
+        return handler(rid, user_id)
+    except D1BatchError:
+        return err("saved-view storage is unavailable", code="storage_unavailable")
 
 
 def _read_watchlist(rid: str | None, user_id: str) -> dict[str, Any]:
@@ -224,6 +230,19 @@ def _read_portfolio(rid: str | None, user_id: str) -> dict[str, Any]:
 
 def _read_saved_view(rid: str | None, user_id: str) -> dict[str, Any]:
     from backend.saved_views.models import SavedViewORM
+
+    d1 = get_d1_saved_views()
+    if d1 is not None:
+        if rid is None:
+            fields = ["id", "name", "scope", "page", "description"]
+            items = project([_saved_view_row(r) for r in d1.list(user_id)], fields)
+            return ok(items, source="openterminalui", quality="live")
+        row = d1.get(user_id, rid)
+        if row is None:
+            return err(f"saved view not found: {rid}", code="not_found")
+        data = _saved_view_row(row)
+        data["payload"] = row.payload_json or {}
+        return ok(data, source="openterminalui", quality="live")
 
     db = SessionLocal()
     try:
