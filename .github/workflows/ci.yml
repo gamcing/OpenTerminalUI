@@ -57,6 +57,9 @@ jobs:
       - name: Cloudflare Worker tests
         run: npm run test:cloudflare
 
+      - name: Apply Cloudflare D1 migrations locally
+        run: npx --yes wrangler@4 d1 migrations apply DB --local --config cloudflare/wrangler.d1-test.jsonc --persist-to "$RUNNER_TEMP/openterminalui-migrations"
+
       - name: Cloudflare local D1 integration
         shell: bash
         run: |
@@ -78,6 +81,7 @@ jobs:
           python -m cloudflare.d1_local_integration
           python -m cloudflare.identity_local_integration
           python -m cloudflare.identity_auth_local_integration
+          python -m cloudflare.api_keys_local_integration
           python -m cloudflare.identity_migration_local_integration
           python -m cloudflare.identity_staging_local_integration
           python -m cloudflare.saved_views_local_integration

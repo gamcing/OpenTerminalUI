@@ -17,11 +17,17 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from backend.models.api_key import APIKeyORM
+from backend.cloudflare.api_keys import get_d1_api_keys
+from backend.cloudflare.d1 import D1BatchError
 from backend.shared.db import SessionLocal
 
 
 class McpAuthError(Exception):
     """Raised when an MCP request's API key is missing, invalid, or inactive."""
+
+
+class McpStorageError(Exception):
+    """Raised when API-key storage is unavailable or misconfigured."""
 
 
 @dataclass(frozen=True)
@@ -39,14 +45,22 @@ class McpPrincipal:
 def authenticate(raw_key: str, db: Session | None = None) -> McpPrincipal:
     """Resolve an ``otui_`` API key to an :class:`McpPrincipal`.
 
-    ``backend.core.api_key_auth.verify_api_key`` compares hashes with ``==``,
-    which is fine for a dependency FastAPI only reaches after its own routing,
-    but this module backs a standalone network surface, so we recompute the
-    sha256 hash the same way and compare it with ``hmac.compare_digest`` to
-    avoid leaking a timing signal to a remote caller.
+    The SQLAlchemy path compares sha256 hashes with ``hmac.compare_digest``.
+    The experimental D1 path authenticates and records last use atomically.
     """
     if not raw_key:
         raise McpAuthError("Missing API key")
+
+    try:
+        identity_keys = get_d1_api_keys()
+        if identity_keys is not None:
+            record = identity_keys.authenticate(raw_key)
+            if record is None:
+                raise McpAuthError("Invalid API key")
+            return McpPrincipal(user_id=record.user_id, key_id=record.id,
+                                permissions=record.permissions, name=record.name)
+    except (D1BatchError, RuntimeError, ValueError, KeyError):
+        raise McpStorageError("API-key storage unavailable") from None
 
     owns_session = db is None
     session = db or SessionLocal()

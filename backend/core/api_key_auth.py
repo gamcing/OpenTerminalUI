@@ -1,7 +1,11 @@
 import secrets
 import hashlib
+import hmac
 from datetime import datetime
 from fastapi import Request, HTTPException, Depends
+from starlette.concurrency import run_in_threadpool
+from backend.cloudflare.api_keys import get_d1_api_keys
+from backend.cloudflare.d1 import D1BatchError
 from sqlalchemy.orm import Session
 from backend.shared.db import SessionLocal
 from backend.models.api_key import APIKeyORM
@@ -16,7 +20,7 @@ def generate_api_key() -> tuple[str, str, str]:
     return full_key, prefix, key_hash
 
 def verify_api_key(provided_key: str, stored_hash: str) -> bool:
-    return hashlib.sha256(provided_key.encode()).hexdigest() == stored_hash
+    return hmac.compare_digest(hashlib.sha256(provided_key.encode()).hexdigest(), stored_hash)
 
 def get_db():
     db = SessionLocal()
@@ -31,6 +35,16 @@ async def get_api_key_user(request: Request, db: Session = Depends(get_db)):
     if not key:
         raise HTTPException(status_code=401, detail="Missing X-API-Key header")
     
+    try:
+        identity_keys = get_d1_api_keys()
+        if identity_keys is not None:
+            record = await run_in_threadpool(identity_keys.authenticate, key)
+            if record is None:
+                raise HTTPException(status_code=401, detail="Invalid API key")
+            return record
+    except (D1BatchError, RuntimeError, ValueError, KeyError):
+        raise HTTPException(status_code=503, detail="API-key storage unavailable") from None
+
     # Look up by prefix
     prefix = key[:12]
     api_key = db.query(APIKeyORM).filter(APIKeyORM.key_prefix == prefix, APIKeyORM.is_active == 1).first()

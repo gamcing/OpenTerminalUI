@@ -1,4 +1,4 @@
-"""Offline identity/saved-view copy primitive; not a complete application migration.
+"""Offline identity, API-key and saved-view copy primitive; not a complete application migration.
 
 The caller must quiesce source writes and use a stable, read-only source snapshot
 throughout the cutover. This module deliberately does not switch the application
@@ -20,8 +20,9 @@ _COLUMNS = {
     "users": ("id", "email", "hashed_password", "role", "created_at", "last_login"),
     "refresh_tokens": ("id", "user_id", "jti", "expires_at", "created_at", "revoked_at"),
     "saved_views": ("id", "user_id", "name", "scope", "page", "payload_json", "description", "created_at", "updated_at"),
+    "api_keys": ("id", "user_id", "name", "key_prefix", "key_hash", "permissions", "is_active", "last_used_at", "created_at"),
 }
-_DATE_FIELDS = {"created_at", "updated_at", "last_login", "expires_at", "revoked_at"}
+_DATE_FIELDS = {"created_at", "updated_at", "last_login", "expires_at", "revoked_at", "last_used_at"}
 
 
 @dataclass(frozen=True, repr=False)
@@ -31,6 +32,7 @@ class IdentitySnapshot:
     users: list[list[Any]] = field(repr=False)
     refresh_tokens: list[list[Any]] = field(repr=False)
     saved_views: list[list[Any]] = field(repr=False)
+    api_keys: list[list[Any]] = field(default_factory=list, repr=False)
 
 
 def _timestamp(value: Any) -> str:
@@ -66,6 +68,18 @@ def read_identity_snapshot(connection: Connection) -> IdentitySnapshot:
                     if not isinstance(value, dict):
                         raise ValueError("source saved-view payload must be a JSON object")
                     value = json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+                elif table == "api_keys" and column == "key_hash" and (
+                    not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value)
+                ):
+                    raise ValueError("source contains an invalid API-key hash")
+                elif table == "api_keys" and column == "key_prefix" and (
+                    not isinstance(value, str) or len(value) != 12 or not value.startswith("otui_")
+                ):
+                    raise ValueError("source contains an invalid API-key prefix")
+                elif table == "api_keys" and column == "permissions" and value not in {"read", "read_write"}:
+                    raise ValueError("source contains invalid API-key permissions")
+                elif table == "api_keys" and column == "is_active" and value not in {0, 1}:
+                    raise ValueError("source contains invalid API-key active state")
                 elif column == "role":
                     value = str(value).upper()
                     if value not in {"ADMIN", "TRADER", "VIEWER"}:
@@ -85,6 +99,7 @@ def import_identity_snapshot(client: D1BatchClient, snapshot: IdentitySnapshot) 
     statements = [D1Statement(
         "SELECT CASE WHEN EXISTS(SELECT 1 FROM users) "
         "OR EXISTS(SELECT 1 FROM refresh_tokens) OR EXISTS(SELECT 1 FROM saved_views) "
+        "OR EXISTS(SELECT 1 FROM api_keys) "
         "THEN json('target tables are not empty') ELSE 1 END"
     )]
     expected = {}

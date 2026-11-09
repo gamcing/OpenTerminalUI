@@ -23,7 +23,7 @@ _INSERT_STAGE = (
 )
 _EMPTY_TARGET = (
     "EXISTS(SELECT 1 FROM users) OR EXISTS(SELECT 1 FROM refresh_tokens) "
-    "OR EXISTS(SELECT 1 FROM saved_views)"
+    "OR EXISTS(SELECT 1 FROM saved_views) OR EXISTS(SELECT 1 FROM api_keys)"
 )
 
 
@@ -93,8 +93,8 @@ def stage_identity_snapshot(client: D1BatchClient, run_id: str, snapshot: Identi
     result = client.batch([
         D1Statement(f"SELECT CASE WHEN {_EMPTY_TARGET} THEN json('target is not empty') ELSE 1 END"),
         D1Statement(
-            "INSERT INTO cf_identity_import_runs (id,snapshot_sha256,users_count,refresh_tokens_count,saved_views_count) "
-            "VALUES (?,?,?,?,?)", [run_id, digest, *counts.values()],
+            "INSERT INTO cf_identity_import_runs (id,snapshot_sha256,users_count,refresh_tokens_count,saved_views_count,api_keys_count) "
+            "VALUES (?,?,?,?,?,?)", [run_id, digest, *counts.values()],
         ),
     ])
     _changes(result[1], 1)
@@ -131,11 +131,11 @@ def stage_identity_snapshot(client: D1BatchClient, run_id: str, snapshot: Identi
 
 
 def finalize_identity_snapshot(client: D1BatchClient, run_id: str, snapshot: IdentitySnapshot) -> dict[str, int]:
-    """Validate staging and atomically install all three tables, then erase it."""
+    """Validate staging and atomically install all four tables, then erase it."""
     run_id = _run_id(run_id)
     counts = {table: len(getattr(snapshot, table)) for table in _COLUMNS}
     checks = [f"({_EMPTY_TARGET})", "NOT EXISTS (SELECT 1 FROM cf_identity_import_runs WHERE id=? "
-              "AND snapshot_sha256=? AND users_count=? AND refresh_tokens_count=? AND saved_views_count=? AND sealed=1)"]
+              "AND snapshot_sha256=? AND users_count=? AND refresh_tokens_count=? AND saved_views_count=? AND api_keys_count=? AND sealed=1)"]
     params: list = [run_id, _digest(snapshot), *counts.values()]
     for table, count in counts.items():
         checks.append("(SELECT COUNT(*) FROM cf_identity_import_rows WHERE run_id=? AND table_name=?) <> ?")

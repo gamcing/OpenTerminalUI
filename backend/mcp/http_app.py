@@ -12,10 +12,11 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 from backend.agent.tools.envelope import ensure_envelope, err
 from backend.config.settings import get_settings
-from backend.mcp.auth import McpAuthError, McpPrincipal, authenticate
+from backend.mcp.auth import McpAuthError, McpPrincipal, McpStorageError, authenticate
 from backend.mcp.session import build_session_registry
 
 
@@ -26,6 +27,8 @@ def _authenticate(x_api_key: str | None) -> McpPrincipal:
         return authenticate(x_api_key)
     except McpAuthError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except McpStorageError:
+        raise HTTPException(status_code=503, detail="API-key storage unavailable") from None
 
 
 def _jsonable(payload: Any) -> Any:
@@ -39,7 +42,7 @@ def build_mcp_router() -> APIRouter:
 
     @router.get("/manifest")
     async def manifest(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> dict[str, Any]:
-        principal = _authenticate(x_api_key)
+        principal = await run_in_threadpool(_authenticate, x_api_key)
         registry = build_session_registry(principal)
         settings = get_settings()
         return {
@@ -51,7 +54,7 @@ def build_mcp_router() -> APIRouter:
 
     @router.get("/tools")
     async def list_tools(x_api_key: str | None = Header(default=None, alias="X-API-Key")) -> dict[str, Any]:
-        principal = _authenticate(x_api_key)
+        principal = await run_in_threadpool(_authenticate, x_api_key)
         registry = build_session_registry(principal)
         tools = [
             {"name": d.name, "description": d.description, "inputSchema": d.parameters}
@@ -65,7 +68,7 @@ def build_mcp_router() -> APIRouter:
         request: Request,
         x_api_key: str | None = Header(default=None, alias="X-API-Key"),
     ) -> dict[str, Any]:
-        principal = _authenticate(x_api_key)
+        principal = await run_in_threadpool(_authenticate, x_api_key)
         registry = build_session_registry(principal)
         if name not in registry.names():
             raise HTTPException(status_code=404, detail=f"unknown tool: {name}")
