@@ -10,9 +10,32 @@ from sqlalchemy.orm import Session
 
 from backend.api.deps import get_db
 from backend.auth.deps import get_current_user
+from backend.cloudflare.d1 import D1BatchError
+from backend.cloudflare.watchlist_storage import get_d1_watchlists
 from backend.db.models import WatchlistORM
 
 router = APIRouter(prefix="/api/watchlists", tags=["watchlists"])
+
+
+def _d1_repository():
+    try:
+        return get_d1_watchlists()
+    except (RuntimeError, ValueError):
+        raise HTTPException(status_code=503, detail="Watchlist storage unavailable") from None
+
+
+def _d1_call(operation, *args, **kwargs):
+    try:
+        return operation(*args, **kwargs)
+    except (D1BatchError, ValueError, KeyError):
+        raise HTTPException(status_code=503, detail="Watchlist storage unavailable") from None
+
+
+def _d1_response(row):
+    if row is None:
+        raise HTTPException(status_code=404, detail="Watchlist not found")
+    return {"id": row.id, "name": row.name, "symbols": row.symbols_json,
+            "column_config": row.column_config_json, "created_at": row.created_at}
 
 
 class WatchlistBase(BaseModel):
@@ -41,6 +64,12 @@ class WatchlistResponse(WatchlistBase):
 @router.get("", response_model=List[WatchlistResponse])
 def list_watchlists(db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     user_id = current_user.id
+    d1 = _d1_repository()
+    if d1 is not None:
+        rows = _d1_call(d1.list_or_create_default, user_id)
+        if not rows:
+            raise HTTPException(status_code=401, detail="User not found")
+        return [_d1_response(row) for row in rows]
     items = db.query(WatchlistORM).filter(WatchlistORM.user_id == user_id).all()
 
     # If no watchlists exist, create a default one
@@ -73,6 +102,13 @@ def list_watchlists(db: Session = Depends(get_db), current_user=Depends(get_curr
 @router.post("", response_model=WatchlistResponse)
 def create_watchlist(payload: WatchlistCreate, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     user_id = current_user.id
+    d1 = _d1_repository()
+    if d1 is not None:
+        symbols = list(dict.fromkeys(s.strip().upper() for s in (payload.symbols or []) if s and s.strip()))
+        row = _d1_call(d1.create, user_id, payload.name, symbols, payload.column_config)
+        if row is None:
+            raise HTTPException(status_code=401, detail="User not found")
+        return _d1_response(row)
     new_wl = WatchlistORM(
         id=str(uuid4()),
         user_id=user_id,
@@ -96,6 +132,10 @@ def create_watchlist(payload: WatchlistCreate, db: Session = Depends(get_db), cu
 
 @router.put("/{watchlist_id}", response_model=WatchlistResponse)
 def update_watchlist(watchlist_id: str, payload: WatchlistUpdate, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    d1 = _d1_repository()
+    if d1 is not None:
+        return _d1_response(_d1_call(d1.update, current_user.id, watchlist_id, name=payload.name,
+                                     symbols=payload.symbols, config=payload.column_config))
     wl = db.query(WatchlistORM).filter(WatchlistORM.id == watchlist_id, WatchlistORM.user_id == current_user.id).first()
     if not wl:
         raise HTTPException(status_code=404, detail="Watchlist not found")
@@ -120,6 +160,11 @@ def update_watchlist(watchlist_id: str, payload: WatchlistUpdate, db: Session = 
 
 @router.delete("/{watchlist_id}")
 def delete_watchlist(watchlist_id: str, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    d1 = _d1_repository()
+    if d1 is not None:
+        if not _d1_call(d1.delete, current_user.id, watchlist_id):
+            raise HTTPException(status_code=404, detail="Watchlist not found")
+        return {"status": "deleted"}
     wl = db.query(WatchlistORM).filter(WatchlistORM.id == watchlist_id, WatchlistORM.user_id == current_user.id).first()
     if not wl:
         raise HTTPException(status_code=404, detail="Watchlist not found")
@@ -130,6 +175,9 @@ def delete_watchlist(watchlist_id: str, db: Session = Depends(get_db), current_u
 
 @router.post("/{watchlist_id}/symbols", response_model=WatchlistResponse)
 def add_symbols(watchlist_id: str, symbols: List[str], db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    d1 = _d1_repository()
+    if d1 is not None:
+        return _d1_response(_d1_call(d1.add_symbols, current_user.id, watchlist_id, symbols))
     wl = db.query(WatchlistORM).filter(WatchlistORM.id == watchlist_id, WatchlistORM.user_id == current_user.id).first()
     if not wl:
         raise HTTPException(status_code=404, detail="Watchlist not found")
@@ -154,6 +202,9 @@ def add_symbols(watchlist_id: str, symbols: List[str], db: Session = Depends(get
 
 @router.delete("/{watchlist_id}/symbols/{symbol}", response_model=WatchlistResponse)
 def remove_symbol(watchlist_id: str, symbol: str, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    d1 = _d1_repository()
+    if d1 is not None:
+        return _d1_response(_d1_call(d1.remove_symbol, current_user.id, watchlist_id, symbol))
     wl = db.query(WatchlistORM).filter(WatchlistORM.id == watchlist_id, WatchlistORM.user_id == current_user.id).first()
     if not wl:
         raise HTTPException(status_code=404, detail="Watchlist not found")

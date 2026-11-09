@@ -21,10 +21,7 @@ _INSERT_STAGE = (
     "INSERT INTO cf_identity_import_rows (run_id,table_name,ordinal,row_json) "
     "SELECT ?,?,?+CAST(key AS INTEGER),value FROM json_each(?) RETURNING ordinal,row_json"
 )
-_EMPTY_TARGET = (
-    "EXISTS(SELECT 1 FROM users) OR EXISTS(SELECT 1 FROM refresh_tokens) "
-    "OR EXISTS(SELECT 1 FROM saved_views) OR EXISTS(SELECT 1 FROM api_keys)"
-)
+_EMPTY_TARGET = " OR ".join(f"EXISTS(SELECT 1 FROM {table})" for table in _COLUMNS)
 
 
 def _run_id(run_id: str) -> str:
@@ -71,6 +68,10 @@ def _digest(snapshot: IdentitySnapshot) -> str:
     return digest.hexdigest()
 
 
+def _json_manifest(counts: dict[str, int]) -> str:
+    return json.dumps(counts, sort_keys=True, separators=(",", ":"))
+
+
 def _changes(result: dict, expected: int) -> None:
     meta = result.get("meta")
     if not isinstance(meta, dict) or meta.get("changes") != expected:
@@ -93,8 +94,9 @@ def stage_identity_snapshot(client: D1BatchClient, run_id: str, snapshot: Identi
     result = client.batch([
         D1Statement(f"SELECT CASE WHEN {_EMPTY_TARGET} THEN json('target is not empty') ELSE 1 END"),
         D1Statement(
-            "INSERT INTO cf_identity_import_runs (id,snapshot_sha256,users_count,refresh_tokens_count,saved_views_count,api_keys_count) "
-            "VALUES (?,?,?,?,?,?)", [run_id, digest, *counts.values()],
+            "INSERT INTO cf_identity_import_runs (id,snapshot_sha256,users_count,refresh_tokens_count,saved_views_count,api_keys_count,manifest_json) "
+            "VALUES (?,?,?,?,?,?,?)", [run_id, digest, counts["users"], counts["refresh_tokens"],
+                                     counts["saved_views"], counts["api_keys"], _json_manifest(counts)],
         ),
     ])
     _changes(result[1], 1)
@@ -131,17 +133,18 @@ def stage_identity_snapshot(client: D1BatchClient, run_id: str, snapshot: Identi
 
 
 def finalize_identity_snapshot(client: D1BatchClient, run_id: str, snapshot: IdentitySnapshot) -> dict[str, int]:
-    """Validate staging and atomically install all four tables, then erase it."""
+    """Validate staging and atomically install all snapshot tables, then erase it."""
     run_id = _run_id(run_id)
     counts = {table: len(getattr(snapshot, table)) for table in _COLUMNS}
+    manifest = _json_manifest(counts)
     checks = [f"({_EMPTY_TARGET})", "NOT EXISTS (SELECT 1 FROM cf_identity_import_runs WHERE id=? "
-              "AND snapshot_sha256=? AND users_count=? AND refresh_tokens_count=? AND saved_views_count=? AND api_keys_count=? AND sealed=1)"]
-    params: list = [run_id, _digest(snapshot), *counts.values()]
-    for table, count in counts.items():
-        checks.append("(SELECT COUNT(*) FROM cf_identity_import_rows WHERE run_id=? AND table_name=?) <> ?")
-        params.extend((run_id, table, count))
-        checks.append("EXISTS (SELECT 1 FROM cf_identity_import_rows WHERE run_id=? AND table_name=? AND ordinal>=?)")
-        params.extend((run_id, table, count))
+              "AND snapshot_sha256=? AND manifest_json=? AND sealed=1)",
+              "(SELECT COUNT(*) FROM cf_identity_import_rows WHERE run_id=?) <> ?",
+              "EXISTS (SELECT 1 FROM json_each(?) AS expected WHERE "
+              "(SELECT COUNT(*) FROM cf_identity_import_rows WHERE run_id=? AND table_name=expected.key) <> expected.value "
+              "OR EXISTS (SELECT 1 FROM cf_identity_import_rows WHERE run_id=? AND table_name=expected.key "
+              "AND ordinal>=expected.value))"]
+    params: list = [run_id, _digest(snapshot), manifest, run_id, sum(counts.values()), manifest, run_id, run_id]
     statements = [D1Statement("SELECT CASE WHEN " + " OR ".join(checks) +
                               " THEN json('incomplete import or nonempty target') ELSE 1 END", params)]
     for table, columns in _COLUMNS.items():

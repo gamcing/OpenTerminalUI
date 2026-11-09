@@ -82,6 +82,7 @@ jobs:
           python -m cloudflare.identity_local_integration
           python -m cloudflare.identity_auth_local_integration
           python -m cloudflare.api_keys_local_integration
+          python -m cloudflare.watchlists_local_integration
           python -m cloudflare.identity_migration_local_integration
           python -m cloudflare.identity_staging_local_integration
           python -m cloudflare.saved_views_local_integration

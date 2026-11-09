@@ -108,7 +108,12 @@ def _paper_positions(user_id: str) -> dict[str, Any]:
 
 def _watchlists(user_id: str) -> dict[str, Any]:
     from backend.models import WatchlistORM
+    from backend.cloudflare.watchlist_storage import get_d1_watchlists
 
+    d1 = get_d1_watchlists()
+    if d1 is not None:
+        return {"items": [{"id": r.id, "name": r.name, "symbols": list(r.symbols_json or [])}
+                          for r in d1.list(user_id)]}
     db = SessionLocal()
     try:
         rows = (

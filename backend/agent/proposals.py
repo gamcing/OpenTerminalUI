@@ -104,6 +104,13 @@ async def confirm_proposal(
         db.commit()
         raise ValueError("expired")
 
+    # Keep the proposal pending when its action cannot be executed safely.
+    if p.type in {"watchlist_add", "watchlist_remove"}:
+        from backend.cloudflare.watchlist_storage import get_d1_watchlists
+
+        if get_d1_watchlists() is not None:
+            raise ValueError("watchlist_storage_unavailable")
+
     # Claim atomically: the executors await (market fill), so a second confirm
     # of the same proposal could otherwise pass the pending check and run twice.
     claimed = (
@@ -270,6 +277,10 @@ def _confirm_alert(db: Session, p: AgentProposal) -> dict:
 
 def _confirm_watchlist_add(db: Session, p: AgentProposal) -> dict:
     from backend.models import WatchlistORM
+    from backend.cloudflare.watchlist_storage import get_d1_watchlists
+
+    if get_d1_watchlists() is not None:
+        raise ValueError("Watchlist proposal execution is unavailable until proposal storage is migrated")
 
     payload = p.payload
     symbol = str(payload.get("symbol", "")).strip().upper()
@@ -395,6 +406,10 @@ def _confirm_screen_alert(db: Session, p: AgentProposal) -> dict:
 
 def _confirm_watchlist_remove(db: Session, p: AgentProposal) -> dict:
     from backend.models import WatchlistORM
+    from backend.cloudflare.watchlist_storage import get_d1_watchlists
+
+    if get_d1_watchlists() is not None:
+        raise ValueError("Watchlist proposal execution is unavailable until proposal storage is migrated")
     wl = db.query(WatchlistORM).filter_by(id=p.payload.get("watchlist_id"), user_id=p.user_id).first()
     if wl is None:
         raise ValueError("Watchlist unavailable")

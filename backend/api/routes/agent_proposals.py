@@ -58,6 +58,8 @@ async def confirm_agent_proposal(
         msg = str(exc)
         if msg == "not_found":
             raise HTTPException(status_code=404, detail="Proposal not found")
+        if msg == "watchlist_storage_unavailable":
+            raise HTTPException(status_code=409, detail="Watchlist proposal execution is unavailable until proposal storage is migrated")
         if msg == "expired":
             # Refresh the proposal so the caller sees the updated status
             p = db.query(AgentProposal).filter(AgentProposal.id == proposal_id).first()

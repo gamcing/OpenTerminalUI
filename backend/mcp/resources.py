@@ -27,6 +27,7 @@ from backend.agent.tools.envelope import cap, err, ok, project
 from backend.cloudflare.d1 import D1BatchError
 from backend.shared.db import SessionLocal
 from backend.saved_views.d1_storage import get_d1_saved_views
+from backend.cloudflare.watchlist_storage import get_d1_watchlists
 
 # Recent-journal and active-alerts reads are capped tighter than the tool
 # default — these are context for a resource pull, not a paged listing.
@@ -105,7 +106,9 @@ def list_resources(user_id: str) -> list[dict[str, Any]]:
 
     db = SessionLocal()
     try:
-        watchlists = db.query(WatchlistORM).filter(WatchlistORM.user_id == user_id).all()
+        watchlist_store = get_d1_watchlists()
+        watchlists = (watchlist_store.list(user_id) if watchlist_store is not None
+                      else db.query(WatchlistORM).filter(WatchlistORM.user_id == user_id).all())
         for w in watchlists:
             items.append({
                 "uri": f"otui://watchlist/{w.id}",
@@ -156,8 +159,8 @@ def read_resource(uri: str, user_id: str) -> dict[str, Any]:
         )
     try:
         return handler(rid, user_id)
-    except D1BatchError:
-        return err("saved-view storage is unavailable", code="storage_unavailable")
+    except (D1BatchError, RuntimeError, ValueError, KeyError):
+        return err("storage is unavailable", code="storage_unavailable")
 
 
 def _read_watchlist(rid: str | None, user_id: str) -> dict[str, Any]:
@@ -165,19 +168,17 @@ def _read_watchlist(rid: str | None, user_id: str) -> dict[str, Any]:
 
     db = SessionLocal()
     try:
+        d1 = get_d1_watchlists()
         if rid is None:
-            rows = db.query(WatchlistORM).filter(WatchlistORM.user_id == user_id).all()
+            rows = d1.list(user_id) if d1 is not None else db.query(WatchlistORM).filter(WatchlistORM.user_id == user_id).all()
             items = [
                 {"id": r.id, "name": r.name, "symbols": list(r.symbols_json or [])[:WATCHLIST_SYMBOL_LIMIT]}
                 for r in rows
             ]
             return ok(items, source="openterminalui", quality="live")
 
-        row = (
-            db.query(WatchlistORM)
-            .filter(WatchlistORM.id == rid, WatchlistORM.user_id == user_id)
-            .first()
-        )
+        row = (d1.get(user_id, rid) if d1 is not None else
+               db.query(WatchlistORM).filter(WatchlistORM.id == rid, WatchlistORM.user_id == user_id).first())
         if row is None:
             return err(f"watchlist not found: {rid}", code="not_found")
 

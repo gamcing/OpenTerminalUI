@@ -83,9 +83,11 @@ def collect_symbols(db: Session, user_id: str, settings: dict[str, Any]) -> list
         return sorted({s for s in (settings.get("custom_symbols") or []) if s})
 
     from backend.db.models import WatchlistORM
+    from backend.cloudflare.watchlist_storage import get_d1_watchlists
 
     symbols: set[str] = set()
-    watchlists = db.query(WatchlistORM).filter(WatchlistORM.user_id == user_id).all()
+    d1 = get_d1_watchlists()
+    watchlists = d1.list(user_id) if d1 is not None else db.query(WatchlistORM).filter(WatchlistORM.user_id == user_id).all()
     for wl in watchlists:
         for ticker in (wl.symbols_json or []):
             upper = str(ticker).strip().upper()

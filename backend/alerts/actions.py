@@ -188,6 +188,14 @@ def _run_add_to_watchlist(
     action: dict[str, Any],
     dry_run: bool,
 ) -> dict[str, Any]:
+    from backend.cloudflare.watchlist_storage import get_d1_watchlists
+
+    try:
+        if get_d1_watchlists() is not None:
+            return {"type": "add_to_watchlist", "ok": False,
+                    "detail": "watchlist action unavailable until alert storage is migrated"}
+    except (RuntimeError, ValueError):
+        return {"type": "add_to_watchlist", "ok": False, "detail": "watchlist storage unavailable"}
     watchlist_id = action["watchlist_id"]
 
     watchlist = db.query(WatchlistORM).filter(
