@@ -1,5 +1,6 @@
 """Exercise staged D1 identity imports against an isolated local database."""
 import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from uuid import uuid4
@@ -9,9 +10,21 @@ from backend.cloudflare.identity_migration import IdentitySnapshot
 from backend.cloudflare.identity_staging import abort_identity_snapshot, finalize_identity_snapshot, stage_identity_snapshot
 
 client = D1BatchClient("http://127.0.0.1:8899", "test-secret-only-not-for-production-1234567890", allow_insecure_localhost=True)
-for migration in ("0001_identity_saved_views.sql", "0002_identity_import_staging.sql"):
+for migration in ("0001_identity_saved_views.sql", "0002_identity_import_staging.sql", "0003_identity_import_sealing.sql"):
+    if migration.startswith("0003"):
+        columns = client.batch([D1Statement("PRAGMA table_info(cf_identity_import_runs)")])[0]["results"]
+        if any(column["name"] == "sealed" for column in columns):
+            continue  # The test database may persist across runs.
     schema = Path("cloudflare/migrations", migration).read_text(encoding="utf-8")
-    client.batch([D1Statement(sql.strip()) for sql in schema.split(";") if sql.strip()])
+    # SQLite triggers contain semicolons within BEGIN/END and cannot be split on ';'.
+    statements, pending = [], ""
+    for line in schema.splitlines(keepends=True):
+        pending += line
+        if sqlite3.complete_statement(pending):
+            statements.append(D1Statement(pending.strip()))
+            pending = ""
+    assert not pending.strip(), "incomplete migration statement"
+    client.batch(statements)
 client.batch([D1Statement("DELETE FROM users"), D1Statement("DELETE FROM cf_identity_import_runs")])
 now = "2026-01-02 03:04:05.123456"
 user = ["u1", "alice@example.test", "hash", "ADMIN", now, None]
@@ -53,18 +66,98 @@ else:
 client.batch([D1Statement("DELETE FROM users")])
 small = IdentitySnapshot(users=[user], refresh_tokens=[token], saved_views=[views[0]])
 
-# Missing staging records and changed source snapshots must fail before cutover.
+# An interrupted upload stays unsealed and cannot be finalized.
+class InterruptedUpload:
+    def __init__(self):
+        self.calls = 0
+    def batch(self, statements):
+        self.calls += 1
+        if self.calls == 3:
+            raise D1BatchOutcomeUnknown("simulated interrupted upload")
+        return client.batch(statements)
+
 run = str(uuid4())
-stage_identity_snapshot(client, run, small)
-client.batch([D1Statement("DELETE FROM cf_identity_import_rows WHERE run_id=? AND table_name='saved_views'", [run])])
+try:
+    stage_identity_snapshot(InterruptedUpload(), run, small)
+except D1BatchOutcomeUnknown:
+    pass
+else:
+    raise AssertionError("upload should have been interrupted")
 try:
     finalize_identity_snapshot(client, run, small)
 except D1BatchOutcomeUnknown:
     pass
 else:
-    raise AssertionError("incomplete staging must not be finalized")
+    raise AssertionError("unsealed staging must not be finalized")
 assert client.batch([D1Statement("SELECT COUNT(*) AS n FROM users")])[0]["results"][0]["n"] == 0
+# INSERT OR REPLACE must not bypass the immutability rules on an open run.
+for statement in (
+    D1Statement("INSERT OR REPLACE INTO cf_identity_import_rows VALUES (?,?,?,?)", [run, "users", 0, "[]"]),
+    D1Statement("INSERT OR REPLACE INTO cf_identity_import_runs (id,snapshot_sha256,users_count,refresh_tokens_count,saved_views_count) VALUES (?,?,?,?,?)", [run, "forged", 1, 1, 1]),
+):
+    try:
+        client.batch([statement])
+    except D1BatchOutcomeUnknown:
+        pass
+    else:
+        raise AssertionError("replacing an existing staged row or run must fail")
 abort_identity_snapshot(client, run)
+
+# A corrupted acknowledgement must prevent sealing even if D1 accepted the chunk.
+class CorruptedAcknowledgement:
+    def batch(self, statements):
+        results = client.batch(statements)
+        if "RETURNING ordinal,row_json" in statements[0].sql:
+            results[0]["results"][0]["row_json"] = "[]"
+        return results
+
+run = str(uuid4())
+try:
+    stage_identity_snapshot(CorruptedAcknowledgement(), run, small)
+except D1BatchOutcomeUnknown:
+    pass
+else:
+    raise AssertionError("incorrect returned rows must fail closed")
+assert client.batch([D1Statement("SELECT sealed FROM cf_identity_import_runs WHERE id=?", [run])])[0]["results"] == [{"sealed": 0}]
+abort_identity_snapshot(client, run)
+
+# Modifying the source while it is uploaded cannot produce a sealed mixed snapshot.
+mutable = IdentitySnapshot(users=[user.copy()], refresh_tokens=[token.copy()], saved_views=[views[0].copy()])
+class MutatingUpload:
+    def batch(self, statements):
+        result = client.batch(statements)
+        if "RETURNING ordinal,row_json" in statements[0].sql and statements[0].params[1] == "users":
+            mutable.saved_views[0][2] = "modified while staging"
+        return result
+
+run = str(uuid4())
+try:
+    stage_identity_snapshot(MutatingUpload(), run, mutable)
+except D1BatchOutcomeUnknown:
+    pass
+else:
+    raise AssertionError("a modified source must not be sealed")
+assert client.batch([D1Statement("SELECT sealed FROM cf_identity_import_runs WHERE id=?", [run])])[0]["results"] == [{"sealed": 0}]
+abort_identity_snapshot(client, run)
+
+# Staged data and metadata cannot be changed, or extended after sealing.
+run = str(uuid4())
+stage_identity_snapshot(client, run, small)
+for statement in (
+    D1Statement("UPDATE cf_identity_import_rows SET row_json='[]' WHERE run_id=?", [run]),
+    D1Statement("DELETE FROM cf_identity_import_rows WHERE run_id=?", [run]),
+    D1Statement("INSERT INTO cf_identity_import_rows VALUES (?,?,?,?)", [run, "users", 8, "[]"]),
+    D1Statement("UPDATE cf_identity_import_runs SET snapshot_sha256='forged' WHERE id=?", [run]),
+):
+    try:
+        client.batch([statement])
+    except D1BatchOutcomeUnknown:
+        pass
+    else:
+        raise AssertionError("sealed staging must be immutable")
+abort_identity_snapshot(client, run)
+
+# Changed source snapshots must fail before cutover.
 run = str(uuid4())
 stage_identity_snapshot(client, run, small)
 changed = IdentitySnapshot(users=[user], refresh_tokens=[token], saved_views=[["changed", *views[0][1:]]])
@@ -111,4 +204,4 @@ assert [item["results"][0]["n"] for item in results] == [1, 1, 1]
 for run in runs:
     abort_identity_snapshot(client, run)
 assert client.batch([D1Statement("SELECT COUNT(*) AS n FROM cf_identity_import_rows")])[0]["results"][0]["n"] == 0
-print("D1 staged import: large snapshot, validation, rollback and concurrent cutover verified")
+print("D1 staged import: verification, sealing, interruption, rollback and concurrent cutover verified")

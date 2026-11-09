@@ -19,7 +19,7 @@ from backend.cloudflare.identity_migration import IdentitySnapshot, _COLUMNS
 _CHUNK_LIMIT = 768 * 1024
 _INSERT_STAGE = (
     "INSERT INTO cf_identity_import_rows (run_id,table_name,ordinal,row_json) "
-    "SELECT ?,?,?+CAST(key AS INTEGER),value FROM json_each(?)"
+    "SELECT ?,?,?+CAST(key AS INTEGER),value FROM json_each(?) RETURNING ordinal,row_json"
 )
 _EMPTY_TARGET = (
     "EXISTS(SELECT 1 FROM users) OR EXISTS(SELECT 1 FROM refresh_tokens) "
@@ -98,10 +98,35 @@ def stage_identity_snapshot(client: D1BatchClient, run_id: str, snapshot: Identi
         ),
     ])
     _changes(result[1], 1)
+    transmitted = hashlib.sha256()
     for table in _COLUMNS:
+        transmitted.update(table.encode("ascii") + b"\0")
         for start, payload, count in _chunks(getattr(snapshot, table)):
+            expected_rows = json.loads(payload)
             result = client.batch([D1Statement(_INSERT_STAGE, [run_id, table, start, payload])])
             _changes(result[0], count)
+            returned = result[0].get("results")
+            if not isinstance(returned, list) or len(returned) != count:
+                raise D1BatchOutcomeUnknown("D1 returned incomplete staged rows")
+            try:
+                ordered = sorted(returned, key=lambda row: row["ordinal"])
+                for offset, row in enumerate(ordered):
+                    expected = _encoded(expected_rows[offset])
+                    if row["ordinal"] != start + offset or _encoded(json.loads(row["row_json"])) != expected:
+                        raise ValueError("mismatch")
+                    data = expected.encode("utf-8")
+                    transmitted.update(len(data).to_bytes(8, "big"))
+                    transmitted.update(data)
+            except (TypeError, ValueError, KeyError, IndexError):
+                raise D1BatchOutcomeUnknown("D1 returned inconsistent staged rows") from None
+    if transmitted.hexdigest() != digest:
+        raise D1BatchOutcomeUnknown("source snapshot changed during staging")
+    sealed = client.batch([D1Statement(
+        "UPDATE cf_identity_import_runs SET sealed=1 WHERE id=? AND sealed=0 AND snapshot_sha256=? RETURNING id",
+        [run_id, digest],
+    )])[0]
+    if sealed.get("results") != [{"id": run_id}]:
+        raise D1BatchOutcomeUnknown("D1 returned an unexpected import seal result")
     return counts
 
 
@@ -110,7 +135,7 @@ def finalize_identity_snapshot(client: D1BatchClient, run_id: str, snapshot: Ide
     run_id = _run_id(run_id)
     counts = {table: len(getattr(snapshot, table)) for table in _COLUMNS}
     checks = [f"({_EMPTY_TARGET})", "NOT EXISTS (SELECT 1 FROM cf_identity_import_runs WHERE id=? "
-              "AND snapshot_sha256=? AND users_count=? AND refresh_tokens_count=? AND saved_views_count=?)"]
+              "AND snapshot_sha256=? AND users_count=? AND refresh_tokens_count=? AND saved_views_count=? AND sealed=1)"]
     params: list = [run_id, _digest(snapshot), *counts.values()]
     for table, count in counts.items():
         checks.append("(SELECT COUNT(*) FROM cf_identity_import_rows WHERE run_id=? AND table_name=?) <> ?")
