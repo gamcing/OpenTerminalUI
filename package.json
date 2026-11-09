@@ -1,10 +1,13 @@
 {
-    "name":  "openterminalui-cloudflare",
-    "private":  true,
-    "type":  "module",
-    "scripts":  {
-                    "build":  "npm ci --prefix frontend \u0026\u0026 npm run build --prefix frontend",
-                    "test:cloudflare":  "node --test cloudflare/*.test.mjs",
-                    "deploy":  "npx wrangler@4 deploy"
-                }
+  "name": "openterminalui-cloudflare",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm ci --prefix frontend && npm run build --prefix frontend",
+    "test:cloudflare": "node --test cloudflare/*.test.mjs",
+    "deploy": "npx wrangler@4 deploy",
+    "migrate:cloudflare:experiment": "npm run check:cloudflare:experiment && npx --yes wrangler@4 d1 migrations apply DB --remote --config cloudflare/wrangler.container-deploy.jsonc",
+    "deploy:cloudflare:experiment": "npm run migrate:cloudflare:experiment && npx --yes wrangler@4 deploy --config cloudflare/wrangler.container-deploy.jsonc",
+    "check:cloudflare:experiment": "node cloudflare/check-container-config.mjs"
+  }
 }

@@ -1,0 +1,60 @@
+{
+  "name": "openterminalui-container-experiment",
+  "main": "container-worker.mjs",
+  "compatibility_date": "2026-11-09",
+  "containers": [
+    {
+      "class_name": "OpenTerminalContainer",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "base": {
+          "dockerfile": "../Dockerfile",
+          "build_context": ".."
+        }
+      }
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "APP_CONTAINER",
+        "class_name": "OpenTerminalContainer"
+      }
+    ]
+  },
+  "exports": {
+    "OpenTerminalContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    }
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "openterminalui-container-experiment",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BACKTESTS",
+      "bucket_name": "openterminalui-container-experiment-backtests"
+    }
+  ],
+  "vars": {
+    "OPENTERMINALUI_CF_D1_SNAPSHOT_EXPERIMENT": "1",
+    "OPENTERMINALUI_CF_R2_EXPERIMENT": "1",
+    "BOOTSTRAP_ADMIN_EMAIL": ""
+  },
+  "secrets": {
+    "required": [
+      "JWT_SECRET_KEY",
+      "CACHE_SIGNING_KEY",
+      "D1_BRIDGE_TOKEN",
+      "R2_BRIDGE_TOKEN",
+      "OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY",
+      "BOOTSTRAP_ADMIN_PASSWORD"
+    ]
+  }
+}

@@ -60,6 +60,11 @@ jobs:
       - name: Apply Cloudflare D1 migrations locally
         run: npx --yes wrangler@4 d1 migrations apply DB --local --config cloudflare/wrangler.d1-test.jsonc --persist-to "$RUNNER_TEMP/openterminalui-migrations"
 
+      - name: Apply container candidate D1 migrations locally
+        run: |
+          npx --yes wrangler@4 d1 migrations apply DB --local --config cloudflare/wrangler.container-deploy.jsonc --persist-to "$RUNNER_TEMP/openterminalui-container-migrations"
+          npx --yes wrangler@4 d1 migrations apply DB --local --config cloudflare/wrangler.container-deploy.jsonc --persist-to "$RUNNER_TEMP/openterminalui-container-migrations"
+
       - name: Cloudflare local D1 integration
         shell: bash
         run: |

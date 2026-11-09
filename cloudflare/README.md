@@ -24,6 +24,14 @@ For Git-connected Workers Builds, set the build command to `npm run build`, the 
 
 The proxy does not authenticate or firewall the backend origin. Secure the backend itself and restrict direct origin access as appropriate for your setup. In particular, do not point it at a development backend with development authentication enabled.
 
+## Container deployment candidate (experimental)
+
+`wrangler.container-deploy.jsonc` is a separate candidate for the full container, D1 and R2 setup. It is not the default `wrangler.jsonc`, and it is **not ready for live data**. Before using it with a disposable Cloudflare account, create a D1 database and R2 bucket, replace the placeholder database ID and resource names with those resources, and set `BOOTSTRAP_ADMIN_EMAIL` in the candidate configuration. Configure the secret names in `cloudflare/.dev.vars.example` as Worker secrets; do not commit their values. The bootstrap password is required for an empty database. After an administrator has been created, remove the bootstrap password from both the candidate's `secrets.required` list and the Worker's secrets if it is no longer needed. Keep the provider encryption key stable and backed up.
+
+`npm run deploy:cloudflare:experiment` first checks the candidate configuration, then applies D1 migrations using the `DB` binding, and finally deploys the Worker and container. The check rejects the placeholder database ID and missing storage bindings, but cannot verify resource ownership, secret values, or permissions. The command **does not create the D1 database or R2 bucket**. Migrations and deployment are separate remote operations: a failed deployment can leave migrations applied. A local deploy using the Dockerfile requires a running Docker-compatible engine; the container image and runtime have not been validated on Cloudflare. The existing `npm run deploy` continues to deploy only the frontend proxy.
+
+For a disposable local migration check, use `npx wrangler@4 d1 migrations apply DB --local --config cloudflare/wrangler.container-deploy.jsonc --persist-to .codex_tmp_container_migrations`. This does not validate remote provisioning, Worker secrets, or a container build.
+
 ## Remaining work for a full Cloudflare deployment
 
 The FastAPI application uses SQLAlchemy sessions and local SQLite in multiple places. D1 cannot be substituted for these connections by changing a URL. A complete Cloudflare deployment needs a transaction-safe data-access migration, storage for durable files, a supported backend runtime, production secrets, and end-to-end tests covering restart and recovery. Do not place the existing SQLite databases on ephemeral container storage and treat them as durable.

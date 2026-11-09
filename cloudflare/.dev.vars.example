@@ -1,0 +1,10 @@
+# Example names only. Never commit real secret values.
+# Each signing/bridge key must be an independently generated secret.
+JWT_SECRET_KEY=
+CACHE_SIGNING_KEY=
+D1_BRIDGE_TOKEN=
+R2_BRIDGE_TOKEN=
+# Stable Fernet key; retain it outside D1 or saved provider settings are lost.
+OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY=
+# Required for an empty database; may be removed once an administrator exists.
+BOOTSTRAP_ADMIN_PASSWORD=
