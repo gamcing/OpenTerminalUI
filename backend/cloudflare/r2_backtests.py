@@ -1,4 +1,4 @@
-"""Bounded R2 backtest artifact client for isolated local integration tests."""
+"""Bounded R2 backtest artifacts for isolated local and container experiments."""
 from __future__ import annotations
 
 import hashlib
@@ -22,17 +22,20 @@ class R2BacktestError(RuntimeError):
 
 
 class R2BacktestStore:
-    def __init__(self, endpoint: str, token: str):
+    def __init__(self, endpoint: str, token: str, *, allow_localhost: bool = True,
+                 allow_intercepted_container_origin: bool = False):
         try:
             url = urlsplit(endpoint)
-            valid = (url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1", "::1"}
-                     and not url.username and not url.password and not url.query and not url.fragment
-                     and url.path in ("", "/"))
+            local = allow_localhost and url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1", "::1"}
+            intercepted = (allow_intercepted_container_origin and url.scheme == "http"
+                           and url.hostname == "openterminal-r2.internal" and url.port is None)
+            valid = ((local or intercepted) and not url.username and not url.password and not url.query
+                     and not url.fragment and url.path in ("", "/"))
             url.port  # validate the port before any request
         except ValueError:
             valid = False
         if not valid or len(token) < 32:
-            raise ValueError("invalid local R2 gateway configuration")
+            raise ValueError("invalid R2 gateway configuration")
         self._endpoint = endpoint.rstrip("/")
         self._token = token
 
@@ -101,7 +104,13 @@ def r2_backtest_store_from_env() -> R2BacktestStore | None:
     if mode == "local":
         return None
     environment = (os.getenv("OPENTERMINALUI_ENV") or os.getenv("APP_ENV") or os.getenv("ENV") or "").strip().lower()
-    if (mode != "r2" or os.getenv("OPENTERMINALUI_R2_LOCAL_TEST") != "1"
-            or environment not in {"dev", "development", "local", "test", "testing"}):
-        raise RuntimeError("R2 backtest storage is restricted to isolated local tests")
-    return R2BacktestStore(os.getenv("R2_GATEWAY_URL", ""), os.getenv("R2_BRIDGE_TOKEN", ""))
+    local = (os.getenv("OPENTERMINALUI_R2_LOCAL_TEST") == "1"
+             and environment in {"dev", "development", "local", "test", "testing"})
+    container = (os.getenv("OPENTERMINALUI_CF_CONTAINER") == "1"
+                 and os.getenv("OPENTERMINALUI_R2_CONTAINER_EXPERIMENT") == "1"
+                 and environment == "production")
+    if mode != "r2" or not (local or container):
+        raise RuntimeError("R2 backtest storage requires an explicitly enabled experiment")
+    return R2BacktestStore(os.getenv("R2_GATEWAY_URL", ""), os.getenv("R2_BRIDGE_TOKEN", ""),
+                           allow_localhost=local and not container,
+                           allow_intercepted_container_origin=container)

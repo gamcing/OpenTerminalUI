@@ -1,6 +1,7 @@
 // Container lifecycle logic is kept separate from cloudflare:workers so that
 // cold starts, failure handling and private egress routing can be tested.
 export const D1_INTERNAL_HOST = "openterminal-d1.internal";
+export const R2_INTERNAL_HOST = "openterminal-r2.internal";
 export const BACKEND_PORT = 8000;
 export const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -32,6 +33,16 @@ export function containerEnvironment(env) {
   for (const name of forwardedSettings) {
     if (typeof env[name] === "string" && env[name] !== "") result[name] = env[name];
   }
+  if (env.OPENTERMINALUI_CF_R2_EXPERIMENT === "1") {
+    if (!env.BACKTESTS || typeof env.R2_BRIDGE_TOKEN !== "string" || env.R2_BRIDGE_TOKEN.length < 32)
+      throw new Error("experimental R2 storage requires a bucket and gateway token");
+    Object.assign(result, {
+      OPENTERMINALUI_BACKTEST_STORE: "r2",
+      OPENTERMINALUI_R2_CONTAINER_EXPERIMENT: "1",
+      R2_GATEWAY_URL: `http://${R2_INTERNAL_HOST}`,
+      R2_BRIDGE_TOKEN: env.R2_BRIDGE_TOKEN,
+    });
+  }
   return result;
 }
 
@@ -47,17 +58,19 @@ export class ContainerRuntime {
   async restore() {
     const container = this.ctx.container;
     if (!container?.running) return;
-    await this.installD1Intercept(container);
+    await this.installPrivateIntercepts(container);
+    containerEnvironment(this.env); // validate the current experimental configuration
     await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
     this.observeExit(container);
   }
 
-  async installD1Intercept(container) {
-    // Register before starting, so an intercept failure never falls back to
-    // public DNS with the database token. The gateway is a loopback service,
-    // not a route on the public Worker.
-    const gateway = this.ctx.exports.D1Gateway({ props: {} });
-    await container.interceptOutboundHttp(D1_INTERNAL_HOST, gateway);
+  async installPrivateIntercepts(container) {
+    // Always restore both routes, including when the R2 setting was turned
+    // off while an older container with R2 credentials is still running.
+    const d1 = this.ctx.exports.D1Gateway({ props: {} });
+    const r2 = this.ctx.exports.R2Gateway({ props: {} });
+    await container.interceptOutboundHttp(D1_INTERNAL_HOST, d1);
+    await container.interceptOutboundHttp(R2_INTERNAL_HOST, r2);
   }
 
   observeExit(container) {
@@ -79,13 +92,14 @@ export class ContainerRuntime {
   async startAndWait() {
     const container = this.ctx.container;
     if (!container) throw new Error("Container binding is unavailable");
-    await this.installD1Intercept(container);
+    const environment = containerEnvironment(this.env);
+    await this.installPrivateIntercepts(container);
     if (!container.running) {
       container.start({
         image: container.images.base,
         instance: "standard-1",
         enableInternet: true,
-        env: containerEnvironment(this.env),
+        env: environment,
       });
     }
     await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);

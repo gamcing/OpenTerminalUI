@@ -1,11 +1,16 @@
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { ContainerRuntime, keepScheduledContainerWarm } from "./container-runtime.mjs";
 import { handleD1Bridge } from "./d1-bridge.mjs";
+import { handleR2Bridge } from "./r2-bridge.mjs";
 
 // This named entrypoint is only reachable through the container's outbound
 // intercept. The public Worker does not route requests to it.
 export class D1Gateway extends WorkerEntrypoint {
   fetch(request) { return handleD1Bridge(request, this.env); }
+}
+
+export class R2Gateway extends WorkerEntrypoint {
+  fetch(request) { return handleR2Bridge(request, this.env); }
 }
 
 export class OpenTerminalContainer extends DurableObject {

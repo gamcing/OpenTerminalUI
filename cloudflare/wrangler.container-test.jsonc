@@ -8,6 +8,9 @@
   ],
   "durable_objects": { "bindings": [ { "name": "APP_CONTAINER", "class_name": "OpenTerminalContainer" } ] },
   "exports": { "OpenTerminalContainer": { "type": "durable-object", "storage": "sqlite" } },
+  "r2_buckets": [
+    { "binding": "BACKTESTS", "bucket_name": "openterminalui-backtests-test" }
+  ],
   "d1_databases": [
     { "binding": "DB", "database_name": "openterminalui-d1-test", "database_id": "00000000-0000-0000-0000-000000000001" }
   ]

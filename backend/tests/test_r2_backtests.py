@@ -91,3 +91,23 @@ def test_default_local_store_keeps_existing_empty_and_file_behavior(monkeypatch,
     result = data_store.write_equity_curve("bt_test", [{"equity": 3.0}])
     assert result["rows"] == 1
     assert any(item["name"].startswith("bt_test.") for item in data_store.list_store_items())
+
+
+def test_container_experiment_only_accepts_the_fixed_private_intercept(monkeypatch):
+    monkeypatch.setenv("OPENTERMINALUI_BACKTEST_STORE", "r2")
+    monkeypatch.setenv("OPENTERMINALUI_ENV", "production")
+    monkeypatch.setenv("OPENTERMINALUI_CF_CONTAINER", "1")
+    monkeypatch.setenv("OPENTERMINALUI_R2_CONTAINER_EXPERIMENT", "1")
+    monkeypatch.setenv("R2_BRIDGE_TOKEN", TOKEN)
+    monkeypatch.setenv("R2_GATEWAY_URL", "http://openterminal-r2.internal")
+    assert isinstance(r2.r2_backtest_store_from_env(), r2.R2BacktestStore)
+    for endpoint in ("http://127.0.0.1:8900", "https://openterminal-r2.internal",
+                     "http://openterminal-r2.internal:80", "http://openterminal-r2.internal/path",
+                     "http://openterminal-r2.internal.attacker.test", "http://user@openterminal-r2.internal"):
+        monkeypatch.setenv("R2_GATEWAY_URL", endpoint)
+        with pytest.raises(ValueError):
+            r2.r2_backtest_store_from_env()
+    monkeypatch.setenv("R2_GATEWAY_URL", "http://openterminal-r2.internal")
+    monkeypatch.setenv("OPENTERMINALUI_R2_CONTAINER_EXPERIMENT", "0")
+    with pytest.raises(RuntimeError):
+        r2.r2_backtest_store_from_env()
