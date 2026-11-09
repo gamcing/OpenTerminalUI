@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import base64
 import sqlite3
 import subprocess
 import sys
@@ -97,6 +98,19 @@ def real_application_probe() -> None:
     assert response.status_code == 200, response.text
     assert response.json()[0]["symbols"] == ["SPY", "MSFT", "NVDA"]
     assert client.get("/api/watchlists").status_code == 401
+    response = client.put("/api/settings/provider-keys", headers=headers, json={
+        "values": {"FMP_API_KEY": "persisted-test-key-alpha", "FRED_API_KEY": ""},
+    })
+    assert response.status_code == 200, response.text
+    provider_rows = {row["name"]: row for row in response.json()["keys"]}
+    assert provider_rows["FMP_API_KEY"]["source"] == "database"
+    assert provider_rows["FMP_API_KEY"]["masked"] != "persisted-test-key-alpha"
+    assert not provider_rows["FRED_API_KEY"]["set"]
+    from sqlalchemy import text
+    from backend.shared.db import engine
+    with engine.connect() as connection:
+        values = connection.execute(text("SELECT ciphertext FROM provider_secrets")).scalars().all()
+        assert len(values) == 2 and all("persisted-test-key-alpha" not in value for value in values)
     client.close()
 
     # These services historically bypassed SQLAlchemy and opened a different
@@ -127,6 +141,28 @@ def real_application_probe() -> None:
     print("real application login and restored watchlist passed without lifespan")
 
 
+def provider_probe(action: str) -> None:
+    # The real app restores encrypted settings before importing provider modules.
+    from backend.main import app
+    from backend.shared.db import snapshot_storage
+    assert "FRED_API_KEY" not in os.environ
+    if action == "provider_read":
+        assert os.environ["FMP_API_KEY"] == "persisted-test-key-alpha"
+        from fastapi.testclient import TestClient
+        client = TestClient(app)
+        response = client.post("/api/auth/login", json={"email": "admin@example.test",
+                                                        "password": "local-test-password-only"})
+        assert response.status_code == 200
+        headers = {"Authorization": "Bearer " + response.json()["access_token"]}
+        response = client.put("/api/settings/provider-keys", headers=headers, json={"values": {"FMP_API_KEY": ""}})
+        assert response.status_code == 200
+        assert "FMP_API_KEY" not in os.environ
+        client.close()
+    else:
+        assert "FMP_API_KEY" not in os.environ
+    snapshot_storage.close()
+
+
 def integration() -> None:
     from backend.cloudflare.d1 import D1BatchClient, D1Statement
     from backend.cloudflare.sqlite_images import D1SQLiteImageStore
@@ -150,6 +186,9 @@ def integration() -> None:
         env.update({
             "OPENTERMINALUI_ENV": "testing", "OPENTERMINALUI_DATABASE_STORE": "d1_snapshot",
             "OPENTERMINALUI_D1_SNAPSHOT_EXPERIMENT": "1", "OPENTERMINALUI_D1_LOCAL_TEST": "1",
+            "OPENTERMINALUI_PROVIDER_KEYS_STORE": "database",
+            "OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY": base64.urlsafe_b64encode(b"local-test-only-encryption-key!!").decode("ascii"),
+            "FMP_API_KEY": "fallback-from-process", "FRED_API_KEY": "fallback-from-process",
             "OPENTERMINALUI_D1_SNAPSHOT_NAME": key, "OPENTERMINALUI_IDENTITY_STORE": "sqlalchemy",
             "OPENTERMINALUI_SAVED_VIEWS_STORE": "sqlalchemy", "OPENTERMINALUI_WATCHLISTS_STORE": "sqlalchemy",
             "OPENTERMINALUI_USER_LAYOUTS_STORE": "sqlalchemy", "D1_GATEWAY_URL": "http://127.0.0.1:8899",
@@ -192,16 +231,25 @@ def integration() -> None:
         run(["-m", "cloudflare.snapshot_process_local_integration", "write"])
         run(["-m", "cloudflare.snapshot_process_local_integration", "read"])
         run(["-m", "cloudflare.snapshot_process_local_integration", "realapp"])
+        assert b"persisted-test-key-alpha" not in store.head(key).data
+        wrong_key = base64.urlsafe_b64encode(b"wrong-test-only-encryption-key!!").decode("ascii")
+        failed = run(["-c", "import backend.main"], overrides={"OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY": wrong_key}, success=False)
+        assert "cannot decrypt provider configuration" in failed.stderr
+        assert "persisted-test-key-alpha" not in failed.stderr
+        run(["-m", "cloudflare.snapshot_process_local_integration", "provider_read"])
+        run(["-m", "cloudflare.snapshot_process_local_integration", "provider_verify"])
         run(["-m", "cloudflare.snapshot_process_local_integration", "verify"])
         assert not (root / "fallback.sqlite").exists()
         assert not (root / "cache.sqlite").exists(), "instrument services must not create a separate database"
         assert not list(root.glob("openterminalui-d1-local-*")), "temporary snapshots must be cleaned up"
-    print("D1 snapshot local mode: separate migration, seed, authenticated app processes and restart verified")
+    print("D1 snapshot local mode: migrations, authenticated app, encrypted settings and restart verified")
 
 
 if __name__ == "__main__":
     if len(sys.argv) == 2 and sys.argv[1] == "realapp":
         real_application_probe()
+    elif len(sys.argv) == 2 and sys.argv[1] in {"provider_read", "provider_verify"}:
+        provider_probe(sys.argv[1])
     elif len(sys.argv) == 2 and sys.argv[1] in {"write", "read", "verify"}:
         probe(sys.argv[1])
     else:

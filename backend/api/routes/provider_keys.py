@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from backend.api.routes.providers import PROVIDER_ENV_KEYS, _PROVIDER_DEFS, probe_provider
 from backend.auth.deps import require_role
 from backend.config.env import _workspace_root
+from backend.config.provider_key_store import database_key_names, database_keys_enabled, save_provider_keys
 from backend.config.settings import get_settings
 
 router = APIRouter()
@@ -182,6 +183,19 @@ async def _put_provider_keys_impl(values: dict[str, str]) -> dict[str, Any]:
     }
 
 
+def _database_keys_response() -> dict[str, Any]:
+    managed = database_key_names()
+    rows = []
+    for name, provider_id in PROVIDER_ENV_KEYS.items():
+        value = os.environ.get(name, "")
+        rows.append({
+            "name": name, "provider": provider_id, "set": bool(value),
+            "masked": mask(value) if value else None,
+            "source": ("database" if name in managed else "process") if value else "unset",
+        })
+    return {"env_file": "", "keys": rows}
+
+
 class PutBody(BaseModel):
     values: dict[str, str]
 
@@ -198,6 +212,8 @@ class PutBody(BaseModel):
 @router.get("/settings/provider-keys", tags=["provider-keys"])
 async def get_provider_keys(_auth=Depends(require_role("admin"))) -> dict[str, Any]:  # noqa: ARG001
     """Return the current state of all provider API keys."""
+    if database_keys_enabled():
+        return _database_keys_response()
     env_path = _env_path()
     env_key_names = set(PROVIDER_ENV_KEYS.keys())
 
@@ -249,7 +265,7 @@ async def get_provider_keys(_auth=Depends(require_role("admin"))) -> dict[str, A
 # ---------------------------------------------------------------------------
 @router.put("/settings/provider-keys", tags=["provider-keys"])
 async def put_provider_keys(body: PutBody, _auth=Depends(require_role("admin"))) -> dict[str, Any]:
-    """Update provider API keys. Writes to .env and os.environ."""
+    """Update provider API keys in the configured store and process environment."""
     values = body.values
 
     # Validate values
@@ -265,6 +281,13 @@ async def put_provider_keys(body: PutBody, _auth=Depends(require_role("admin")))
         if name not in PROVIDER_ENV_KEYS:
             raise HTTPException(status_code=422, detail=f"unknown key: {name}")
 
+    if database_keys_enabled():
+        save_provider_keys(values)
+        result = _database_keys_response()
+        live_set = {"KITE_ACCESS_TOKEN", "LM_STUDIO_BASE_URL", "OPENROUTER_API_KEY", "FRED_API_KEY"}
+        result["applied_live"] = [name for name, value in values.items() if value and name in live_set]
+        result["restart_required"] = [name for name, value in values.items() if not value or name not in live_set]
+        return result
     return await _put_provider_keys_impl(values)
 
 

@@ -10,3 +10,5 @@ from backend.research_dossiers.models import *  # noqa: F401,F403,E402
 from backend.screen_monitoring.models import ScreenSchedule, ScreenChange  # noqa: F401,E402
 
 from backend.research_inbox.models import *  # noqa: F401,F403,E402
+
+from backend.models.provider_secret import ProviderSecret  # noqa: F401,E402

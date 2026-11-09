@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+# Restore durable provider settings before importing modules that cache them.
+from backend.config.env import load_local_env
+from backend.config.provider_key_store import restore_provider_keys
+
+load_local_env()
+restore_provider_keys()
+
 import logging
 
 import asyncio
@@ -26,14 +33,11 @@ from backend.services.prefetch_worker import get_prefetch_worker
 from backend.services.us_tick_stream import get_us_tick_stream_service
 from backend.paper_trading import get_paper_engine
 from backend.core.service_status import service_status_registry
-from backend.config.env import load_local_env
 from backend.config.security import validate_runtime_secrets
 from backend.config.settings import get_settings
 from backend.shared.cache import cache as cache_instance
 from backend.shared.db import init_db
 from backend.shared.ws_manager import get_marketdata_hub
-
-load_local_env()
 
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())

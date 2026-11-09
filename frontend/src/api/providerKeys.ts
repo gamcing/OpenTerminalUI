@@ -8,7 +8,7 @@ export type ProviderKeyRow = {
   provider: string;
   set: boolean;
   masked: string | null;
-  source: "env_file" | "process" | "unset";
+  source: "env_file" | "database" | "process" | "unset";
 };
 
 export type ProviderKeysResponse = {

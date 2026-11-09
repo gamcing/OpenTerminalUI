@@ -21,6 +21,7 @@ mibian>=0.1.3
 python-jose
 passlib[bcrypt]
 bcrypt==4.0.1
+cryptography>=42
 alembic
 aiosqlite
 asyncpg

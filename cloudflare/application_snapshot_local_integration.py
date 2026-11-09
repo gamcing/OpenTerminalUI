@@ -82,7 +82,7 @@ with tempfile.TemporaryDirectory() as temp:
     upgrade(engine)
     assert store.head_info(key).revision == 1
     with engine.connect() as connection:
-        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0014_research_review"
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == "0015_provider_secrets"
     # The real startup also registers additional application models.
     import backend.shared.db as shared
     shared.engine = engine
@@ -161,6 +161,6 @@ with tempfile.TemporaryDirectory() as temp:
                                env=standard_env, capture_output=True, text=True, timeout=60)
     assert completed.returncode == 0, completed.stderr
     with closing(sqlite3.connect(str(root / "standard.sqlite"))) as check:
-        assert check.execute("SELECT version_num FROM alembic_version").fetchone() == ("0014_research_review",)
+        assert check.execute("SELECT version_num FROM alembic_version").fetchone() == ("0015_provider_secrets",)
 
 print("Application snapshot prototype: Alembic rollback, model startup, seed, auth, routes and restart verified")

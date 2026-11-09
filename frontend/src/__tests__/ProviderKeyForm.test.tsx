@@ -41,6 +41,14 @@ describe("ProviderKeyForm", () => {
     expect(orInput).toHaveAttribute("placeholder", "current: sk…b2");
   });
 
+  it("displays the database source for stored keys", () => {
+    render(<ProviderKeyForm {...defaultProps} rows={[
+      { name: "FMP_API_KEY", provider: "fmp", set: true, masked: "se?et", source: "database" },
+    ]} />);
+    expect(screen.getByText("(database)")).toBeInTheDocument();
+    expect(screen.getByLabelText("FMP_API_KEY")).toHaveAttribute("placeholder", "current: se?et");
+  });
+
   it("Save is disabled until typing", () => {
     render(<ProviderKeyForm {...defaultProps} />);
 
