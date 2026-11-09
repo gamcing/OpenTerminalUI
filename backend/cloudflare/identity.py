@@ -1,11 +1,11 @@
 """D1 identity operations with atomic, single-use refresh-token rotation.
 
-This repository is not wired into login or authorization yet. Other application
-models still depend on users in the SQLAlchemy database.
+Only isolated development authentication may use this repository. Other
+application models still depend on users in the SQLAlchemy database.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -17,7 +17,7 @@ from backend.cloudflare.d1 import D1BatchClient, D1BatchOutcomeUnknown, D1Statem
 class IdentityUser:
     id: str
     email: str
-    hashed_password: str
+    hashed_password: str = field(repr=False)
     role: str
     created_at: datetime
     last_login: datetime | None
@@ -82,14 +82,16 @@ class D1IdentityRepository:
         rows = _rows(result)
         return _user(rows[0]) if rows else None
 
-    def record_login_and_issue_refresh(self, user_id: str, jti: str, expires_at: datetime) -> bool:
+    def record_login_and_issue_refresh(self, user_id: str, jti: str, expires_at: datetime,
+                                       *, expected_password_hash: str) -> bool:
         now = _timestamp(datetime.now(timezone.utc))
         results = self.client.batch([
-            D1Statement("UPDATE users SET last_login = ? WHERE id = ? RETURNING id", [now, user_id]),
+            D1Statement("UPDATE users SET last_login = ? WHERE id = ? AND hashed_password = ? RETURNING id",
+                        [now, user_id, expected_password_hash]),
             D1Statement(
                 "INSERT INTO refresh_tokens (id,user_id,jti,expires_at,created_at,revoked_at) "
-                "SELECT ?,id,?,?,?,NULL FROM users WHERE id = ? RETURNING user_id",
-                [str(uuid4()), jti, _timestamp(expires_at), now, user_id],
+                "SELECT ?,id,?,?,?,NULL FROM users WHERE id = ? AND hashed_password = ? RETURNING user_id",
+                [str(uuid4()), jti, _timestamp(expires_at), now, user_id, expected_password_hash],
             ),
         ])
         updated, inserted = (_rows(result) for result in results)
@@ -117,3 +119,17 @@ class D1IdentityRepository:
         if len(inserted) != len(revoked) or len(inserted) > 1:
             raise D1BatchOutcomeUnknown("D1 returned inconsistent token rotation results")
         return bool(inserted)
+
+    def reset_password_and_revoke(self, email: str, hashed_password: str) -> bool:
+        """Development-only reset support; never call without ownership verification in production."""
+        normalized = email.strip().lower()
+        now = _timestamp(datetime.now(timezone.utc))
+        results = self.client.batch([
+            D1Statement("UPDATE users SET hashed_password = ? WHERE email = ? RETURNING id", [hashed_password, normalized]),
+            D1Statement("UPDATE refresh_tokens SET revoked_at = ? WHERE user_id = "
+                        "(SELECT id FROM users WHERE email = ?) AND revoked_at IS NULL", [now, normalized]),
+        ])
+        users = _rows(results[0])
+        if len(users) > 1:
+            raise D1BatchOutcomeUnknown("D1 returned inconsistent password-reset results")
+        return bool(users)

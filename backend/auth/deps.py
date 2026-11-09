@@ -9,6 +9,9 @@ from sqlalchemy.orm import Session
 
 from backend.api.deps import get_db
 from backend.auth.jwt import decode_token
+from backend.cloudflare.d1 import D1BatchError
+from backend.cloudflare.identity import IdentityUser
+from backend.cloudflare.identity_storage import get_d1_identity
 from backend.models.user import User, UserRole
 
 security = HTTPBearer(auto_error=False)
@@ -21,7 +24,7 @@ _ROLE_RANK = {
 }
 
 
-def _extract_user_from_payload(db: Session, payload: dict) -> User:
+def _extract_user_from_payload(db: Session, payload: dict) -> User | IdentityUser:
     token_type = str(payload.get("type") or "")
     if token_type != "access":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
@@ -30,7 +33,11 @@ def _extract_user_from_payload(db: Session, payload: dict) -> User:
     if not user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token subject")
 
-    user = db.query(User).filter(User.id == user_id).first()
+    try:
+        identity = get_d1_identity()
+        user = identity.get_by_id(user_id) if identity is not None else db.query(User).filter(User.id == user_id).first()
+    except (D1BatchError, RuntimeError, ValueError):
+        raise HTTPException(status_code=503, detail="Identity storage unavailable") from None
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     return user
@@ -64,7 +71,7 @@ def get_current_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security),
     db: Session = Depends(get_db),
-) -> User:
+) -> User | IdentityUser:
     existing = getattr(request.state, "current_user", None)
     if existing is not None:
         return existing
@@ -80,6 +87,7 @@ def get_current_user(
         or "development"
     ).strip().lower()
     _is_dev_env = _runtime_env in _DEV_ENV_NAMES
+    _is_sqlalchemy_identity = os.getenv("OPENTERMINALUI_IDENTITY_STORE", "sqlalchemy").strip().lower() == "sqlalchemy"
 
     # e2e dev-auth: the Playwright stack runs the backend with E2E_DEV_AUTH=1
     # and the frontend sends unsigned dev tokens the backend can't verify.
@@ -87,7 +95,7 @@ def get_current_user(
     # treats the 401 as a session expiry, refreshes the dev token, fails, and
     # logs the user out, breaking every page that calls an authed endpoint.
     # SECURITY: only allowed in development environments.
-    if _is_dev_env and os.environ.get("E2E_DEV_AUTH") == "1":
+    if _is_dev_env and _is_sqlalchemy_identity and os.environ.get("E2E_DEV_AUTH") == "1":
         user = _get_or_create_dev_user(db)
         request.state.current_user = user
         return user
@@ -100,6 +108,7 @@ def get_current_user(
         os.environ.get("AUTH_MIDDLEWARE_ENABLED", "1") != "1"
         and str(getattr(request.url, "path", "")).startswith("/api/risk")
         and _is_dev_env
+        and _is_sqlalchemy_identity
     ):
         user = User(
             id="dev-user",

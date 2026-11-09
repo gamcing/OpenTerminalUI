@@ -8,7 +8,8 @@ Reads ``BOOTSTRAP_ADMIN_EMAIL`` / ``BOOTSTRAP_ADMIN_PASSWORD`` from the environm
 * No-op if no password is configured — never creates an account with a blank /
   guessable password.
 
-The script always exits 0 so it can run during startup without ever blocking it.
+The legacy SQLAlchemy path normally exits 0. An explicitly selected D1
+identity store reports failure instead of silently seeding a different store.
 """
 from __future__ import annotations
 
@@ -31,9 +32,23 @@ def main() -> int:
         print("[seed-admin] BOOTSTRAP_ADMIN_EMAIL/PASSWORD not set; skipping admin seed.")
         return 0
 
+    # Experimental D1 identity is limited to isolated local tests.  Do not
+    # fall back to SQLAlchemy if that explicitly selected store is unavailable.
+    try:
+        from backend.cloudflare.d1 import D1BatchError
+        from backend.cloudflare.identity_storage import get_d1_identity
+        identity = get_d1_identity()
+        if identity is not None:
+            from passlib.context import CryptContext
+            created = identity.seed_first_admin(email, CryptContext(schemes=["bcrypt"], deprecated="auto").hash(password))
+            print("[seed-admin] D1 admin created." if created else "[seed-admin] a D1 user already exists; skipping.")
+            return 0
+    except (D1BatchError, RuntimeError, ValueError, ImportError):
+        print("[seed-admin] identity storage unavailable; refusing fallback.")
+        return 1
+
     try:
         from passlib.context import CryptContext
-
         from backend.models.user import User, UserRole
         from backend.shared.db import Base, SessionLocal, engine
     except Exception as exc:  # pragma: no cover - defensive, never block startup

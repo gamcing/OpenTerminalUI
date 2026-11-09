@@ -48,11 +48,12 @@ In a second terminal, run:
 node cloudflare/d1-local.integration.mjs
 python -m cloudflare.d1_local_integration
 python -m cloudflare.identity_local_integration
+python -m cloudflare.identity_auth_local_integration
 python -m cloudflare.identity_migration_local_integration
 python -m cloudflare.identity_staging_local_integration
 ```
 
-The identity tests delete users from the local database; use an isolated disposable database. The identity repository is a standalone prototype and is not connected to authentication or authorization. The fixed token is **only for local testing**. Any future deployed gateway must use an independently generated high-entropy secret, protect it as a Cloudflare secret, limit access to the backend, and avoid exposing arbitrary SQL execution to clients. The tests exercise local D1 and do not establish production durability, transactional compatibility of the application, or a complete deployment.
+The identity tests delete users from the local database; use an isolated disposable database. D1 identity is connected to authentication and authorization only in explicitly enabled, loopback-only development tests; production use is rejected. The fixed token is **only for local testing**. Any future deployed gateway must use an independently generated high-entropy secret, protect it as a Cloudflare secret, limit access to the backend, and avoid exposing arbitrary SQL execution to clients. The tests exercise local D1 and do not establish production durability, transactional compatibility of the application, or a complete deployment.
 
 ## Experimental container runtime
 
@@ -82,3 +83,9 @@ These tests reset the local test users and require an isolated disposable databa
 This primitive is not a deployment or a full migration: there is no production import command or coordinated cutover, and every other application domain and durable file still needs migration. Do not use it to enable the experimental stores for live users. The local integration test uses a disposable database.
 
 `backend/cloudflare/identity_staging.py` adds an experimental staged path for larger snapshots after applying `migrations/0002_identity_import_staging.sql` and `migrations/0003_identity_import_sealing.sql`. It uploads bounded chunks into private staging tables, verifies the returned staged rows against the source, seals the immutable run, and checks the run ID, source snapshot fingerprint, row counts and row ordinals before copying all three tables and deleting the staging run in a single D1 batch. Individual source rows still need to fit the 768 KiB request budget, the complete source snapshot is currently held in memory, and D1 transaction limits can still prevent very large final copies. The caller must keep the snapshot immutable, ensure exclusive administrative access to staging, and retain the UUID before starting. An interrupted or failed run can leave password hashes and token IDs in staging: inspect the outcome and use `abort_identity_snapshot` to delete the run when safe. A timeout during finalization can mean the import committed; inspect the destination before retrying. This remains a development primitive and is not a complete application migration.
+
+## Experimental D1 identity authentication
+
+The registration, login, refresh, protected-user lookup and bootstrap-admin paths can use D1 in isolated development tests. The `cloudflare.identity_auth_local_integration` test exercises these real routes and middleware with a disposable local D1 database and stubs unrelated services. It also checks the original SQLAlchemy path independently. The opt-in requires `OPENTERMINALUI_IDENTITY_STORE=d1`, `OPENTERMINALUI_D1_IDENTITY_EXPERIMENT=1`, `OPENTERMINALUI_D1_LOCAL_TEST=1`, an explicitly configured development environment and a loopback HTTP gateway. Misconfiguration and production environments fail closed rather than falling back to another identity store.
+
+Do not use this mode with real users: other application domains and API-key authentication still rely on the original SQLAlchemy database, so identities and foreign keys would diverge. Existing access tokens remain valid until expiry after a development-only password reset, matching the existing application behavior.

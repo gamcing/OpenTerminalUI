@@ -26,17 +26,19 @@ assert identity.get_by_id(alice.id).email == alice.email
 assert identity.get_by_email(" ALICE@example.test ").id == alice.id
 now = datetime.now(timezone.utc)
 expiry = now + timedelta(days=1)
-assert identity.record_login_and_issue_refresh(alice.id, "old-jti", expiry)
+assert identity.record_login_and_issue_refresh(alice.id, "old-jti", expiry, expected_password_hash="alice-hash")
 assert identity.get_by_id(alice.id).last_login is not None
-assert not identity.record_login_and_issue_refresh("missing", "never-created", expiry)
+assert not identity.record_login_and_issue_refresh(alice.id, "stale-password", expiry, expected_password_hash="stale")
+assert "alice-hash" not in repr(alice)
+assert not identity.record_login_and_issue_refresh("missing", "never-created", expiry, expected_password_hash="hash")
 assert not identity.rotate_refresh(admin.id, "old-jti", "wrong-user", expiry)
 assert identity.rotate_refresh(alice.id, "old-jti", "new-jti", expiry)
 assert not identity.rotate_refresh(alice.id, "old-jti", "replay", expiry)
-assert identity.record_login_and_issue_refresh(alice.id, "expired-jti", now - timedelta(seconds=1))
+assert identity.record_login_and_issue_refresh(alice.id, "expired-jti", now - timedelta(seconds=1), expected_password_hash="alice-hash")
 assert not identity.rotate_refresh(alice.id, "expired-jti", "expired-new", expiry)
 
 # A conflict during the first statement must not revoke the original token.
-assert identity.record_login_and_issue_refresh(alice.id, "rollback-old", expiry)
+assert identity.record_login_and_issue_refresh(alice.id, "rollback-old", expiry, expected_password_hash="alice-hash")
 try:
     identity.rotate_refresh(alice.id, "rollback-old", "new-jti", expiry)
 except D1BatchOutcomeUnknown:
@@ -46,7 +48,7 @@ else:
 assert identity.rotate_refresh(alice.id, "rollback-old", "rollback-new", expiry)
 
 # A failure after inserting a replacement must roll the insertion back as well.
-assert identity.record_login_and_issue_refresh(alice.id, "trigger-old", expiry)
+assert identity.record_login_and_issue_refresh(alice.id, "trigger-old", expiry, expected_password_hash="alice-hash")
 client.batch([D1Statement("CREATE TRIGGER reject_revocation BEFORE UPDATE ON refresh_tokens "
                           "WHEN OLD.jti = 'trigger-old' BEGIN SELECT RAISE(ABORT, 'test'); END")])
 try:
@@ -63,7 +65,7 @@ assert len(rows) == 1 and rows[0]["jti"] == "trigger-old" and rows[0]["revoked_a
 assert identity.rotate_refresh(alice.id, "trigger-old", "trigger-new", expiry)
 
 # D1 serializes each batch: two concurrent refreshes may produce only one token.
-assert identity.record_login_and_issue_refresh(alice.id, "race-old", expiry)
+assert identity.record_login_and_issue_refresh(alice.id, "race-old", expiry, expected_password_hash="alice-hash")
 def rotate(jti):
     return identity.rotate_refresh(alice.id, "race-old", jti, expiry)
 with ThreadPoolExecutor(max_workers=2) as pool:

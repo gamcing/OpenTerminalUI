@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session
 from backend.api.deps import get_db
 from backend.auth.jwt import create_access_token, create_refresh_token, decode_token, refresh_expiry_utc
 from backend.config.security import is_development_env
+from backend.cloudflare.d1 import D1BatchError
+from backend.cloudflare.identity_storage import get_d1_identity
 from backend.models.user import RefreshToken, User, UserRole
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -81,6 +83,27 @@ def _validate_password(password: str) -> None:
         raise HTTPException(status_code=400, detail="Password must be at most 72 bytes")
 
 
+def _identity_repo():
+    try:
+        return get_d1_identity()
+    except (RuntimeError, ValueError):
+        raise HTTPException(status_code=503, detail="Identity storage unavailable") from None
+
+
+def _identity_call(operation, *args, **kwargs):
+    try:
+        return operation(*args, **kwargs)
+    except (D1BatchError, ValueError):
+        raise HTTPException(status_code=503, detail="Identity storage unavailable") from None
+
+
+def _d1_token_pair(user, jti: str) -> TokenPairResponse:
+    return TokenPairResponse(
+        access_token=create_access_token(subject=user.id, email=user.email, role=user.role),
+        refresh_token=create_refresh_token(subject=user.id, email=user.email, role=user.role, jti=jti),
+    )
+
+
 def _build_token_pair(db: Session, user: User) -> TokenPairResponse:
     jti = secrets.token_hex(16)
     access = create_access_token(subject=user.id, email=user.email, role=user.role.value)
@@ -103,6 +126,14 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> UserRes
     email = _normalize_email(payload.email)
     _validate_email(email)
     _validate_password(payload.password)
+
+    identity = _identity_repo()
+    if identity is not None:
+        user = _identity_call(identity.create_user, email, pwd_context.hash(payload.password))
+        if user is None:
+            raise HTTPException(status_code=409, detail="Email already registered")
+        return UserResponse(id=user.id, email=user.email, role=UserRole(user.role),
+                            created_at=user.created_at, last_login=user.last_login)
 
     existing = db.query(User).filter(User.email == email).first()
     if existing:
@@ -129,6 +160,18 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> UserRes
 @limiter.limit("5/minute")
 def login(request: Request, payload: LoginRequest, db: Session = Depends(get_db)) -> TokenPairResponse:
     email = _normalize_email(payload.email)
+    identity = _identity_repo()
+    if identity is not None:
+        user = _identity_call(identity.get_by_email, email)
+        if not user or not pwd_context.verify(payload.password, user.hashed_password):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+        jti = secrets.token_hex(16)
+        pair = _d1_token_pair(user, jti)
+        if not _identity_call(identity.record_login_and_issue_refresh, user.id, jti, refresh_expiry_utc(),
+                              expected_password_hash=user.hashed_password):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+        return pair
+
     user = db.query(User).filter(User.email == email).first()
     if not user or not pwd_context.verify(payload.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
@@ -153,6 +196,17 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenPair
     jti = str(decoded.get("jti") or "").strip()
     if not user_id or not jti:
         raise HTTPException(status_code=401, detail="Malformed refresh token")
+
+    identity = _identity_repo()
+    if identity is not None:
+        user = _identity_call(identity.get_by_id, user_id)
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        new_jti = secrets.token_hex(16)
+        pair = _d1_token_pair(user, new_jti)
+        if not _identity_call(identity.rotate_refresh, user.id, jti, new_jti, refresh_expiry_utc()):
+            raise HTTPException(status_code=401, detail="Refresh token invalid or already used")
+        return pair
 
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -183,6 +237,11 @@ def forgot_access(request: Request, payload: ForgotAccessRequest, db: Session = 
     email = _normalize_email(payload.email)
     _validate_email(email)
     _validate_password(payload.new_password)
+
+    identity = _identity_repo()
+    if identity is not None:
+        _identity_call(identity.reset_password_and_revoke, email, pwd_context.hash(payload.new_password))
+        return None
 
     user = db.query(User).filter(User.email == email).first()
     if not user:

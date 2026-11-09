@@ -5,9 +5,12 @@ import os
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from backend.auth.deps import api_key_auth_path, auth_exempt_path
 from backend.auth.jwt import decode_token
+from backend.cloudflare.d1 import D1BatchError
+from backend.cloudflare.identity_storage import get_d1_identity
 from backend.shared.db import SessionLocal
 from backend.models.user import User
 
@@ -61,14 +64,21 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not user_id:
             return JSONResponse({"detail": "Invalid token subject"}, status_code=401)
 
-        session_factory = getattr(request.app.state, "db_session_factory", SessionLocal)
-        db = session_factory()
         try:
-            user = db.query(User).filter(User.id == user_id).first()
-            if not user:
-                return JSONResponse({"detail": "User not found"}, status_code=401)
-            request.state.current_user = user
-        finally:
-            db.close()
-
+            identity = get_d1_identity()
+            if identity is not None:
+                # The D1 client performs blocking I/O; never block the ASGI loop.
+                user = await run_in_threadpool(identity.get_by_id, user_id)
+            else:
+                session_factory = getattr(request.app.state, "db_session_factory", SessionLocal)
+                db = session_factory()
+                try:
+                    user = db.query(User).filter(User.id == user_id).first()
+                finally:
+                    db.close()
+        except (D1BatchError, RuntimeError, ValueError):
+            return JSONResponse({"detail": "Identity storage unavailable"}, status_code=503)
+        if not user:
+            return JSONResponse({"detail": "User not found"}, status_code=401)
+        request.state.current_user = user
         return await call_next(request)
