@@ -37,12 +37,57 @@ class BacktestJobService:
     def __init__(self) -> None:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._worker_task: asyncio.Task[None] | None = None
+        self._snapshot_recovered = False
         self._runner = StrategyRunner(timeout_seconds=2.0)
 
     async def ensure_worker(self) -> None:
         if self._worker_task and not self._worker_task.done():
             return
         self._worker_task = asyncio.create_task(self._worker(), name="backtest-jobs-worker")
+
+    async def recover_snapshot_jobs(self) -> None:
+        """Restore the singleton container's queue after its database is fenced.
+
+        Interrupted running jobs are not replayed: their external work may have
+        occurred even if the process died before saving a final result.
+        """
+        if self._snapshot_recovered:
+            return
+        if (self._worker_task and not self._worker_task.done()) or not self._queue.empty():
+            raise RuntimeError("backtest recovery requires an idle worker")
+        generator = get_db()
+        db = next(generator)
+        try:
+            queued = [row[0] for row in db.query(BacktestRun.run_id)
+                      .filter(BacktestRun.status == "queued").order_by(BacktestRun.id).all()]
+            running = db.query(BacktestRun.id).filter(BacktestRun.status == "running").first()
+            if running is not None:
+                db.query(BacktestRun).filter(BacktestRun.status == "running").update({
+                    BacktestRun.status: "failed",
+                    BacktestRun.error: "Backtest interrupted by a container restart; submit it again.",
+                    BacktestRun.updated_at: datetime.now(timezone.utc).isoformat(),
+                }, synchronize_session=False)
+            db.commit()
+        finally:
+            generator.close()
+        for run_id in queued:
+            self._queue.put_nowait(run_id)
+        self._snapshot_recovered = True
+        if queued:
+            await self.ensure_worker()
+
+    async def stop_snapshot_worker(self) -> None:
+        task = self._worker_task
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._worker_task = None
+        # Queued records are authoritative and are reloaded on the next start.
+        self._queue = asyncio.Queue()
+        self._snapshot_recovered = False
 
     async def submit(self, req: BacktestJobRequest) -> str:
         run_id = f"bt_{uuid4().hex[:12]}"

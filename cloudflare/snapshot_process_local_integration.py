@@ -163,6 +163,51 @@ def provider_probe(action: str) -> None:
     snapshot_storage.close()
 
 
+def jobs_probe(action: str) -> None:
+    """Exercise queue recovery across processes using the coordinated database."""
+    import asyncio
+    from backend.models.core import BacktestRun
+    from backend.shared.db import SessionLocal, snapshot_storage
+    from backend.services.backtest_jobs import BacktestJobService
+
+    if action == "jobs_prepare":
+        with SessionLocal() as db:
+            db.add_all([
+                BacktestRun(run_id="recovery-queued", status="queued", request_json='{"symbol":"SPY"}'),
+                BacktestRun(run_id="recovery-running", status="running", request_json='{"symbol":"SPY"}'),
+                BacktestRun(run_id="recovery-done", status="done", request_json='{"symbol":"SPY"}',
+                            result_json='{"preserved":true}'),
+            ])
+            db.commit()
+    elif action == "jobs_recover":
+        async def run():
+            service = BacktestJobService()
+            executed = []
+            async def execute(run_id):
+                executed.append(run_id)
+                with SessionLocal() as db:
+                    row = db.query(BacktestRun).filter_by(run_id=run_id).one()
+                    row.status = "done"
+                    db.commit()
+            service._execute = execute  # isolate market data and strategy execution
+            try:
+                await service.recover_snapshot_jobs()
+                await service.recover_snapshot_jobs()
+                await asyncio.wait_for(service._queue.join(), timeout=30)
+                assert executed == ["recovery-queued"]
+            finally:
+                await service.stop_snapshot_worker()
+        asyncio.run(run())
+    else:
+        with SessionLocal() as db:
+            rows = {row.run_id: row for row in db.query(BacktestRun).filter(
+                BacktestRun.run_id.like("recovery-%")).all()}
+            assert rows["recovery-queued"].status == "done"
+            assert rows["recovery-running"].status == "failed" and "interrupted" in rows["recovery-running"].error
+            assert rows["recovery-done"].result_json == '{"preserved":true}'
+    snapshot_storage.close()
+
+
 def integration() -> None:
     from backend.cloudflare.d1 import D1BatchClient, D1Statement
     from backend.cloudflare.sqlite_images import D1SQLiteImageStore
@@ -303,6 +348,8 @@ d1.D1BatchClient.__init__.__kwdefaults__['opener'] = intercepted
         run(["-m", "cloudflare.snapshot_process_local_integration", "read"])
         run(["-m", "cloudflare.snapshot_process_local_integration", "realapp"])
         run(["-m", "cloudflare.snapshot_process_local_integration", "verify"])
+        for action in ("jobs_prepare", "jobs_recover", "jobs_verify"):
+            run(["-m", "cloudflare.snapshot_process_local_integration", action])
         assert not (root / "fallback.sqlite").exists()
         assert not list(root.glob("openterminalui-d1-local-*"))
     print("Local D1 snapshot: migrations, authenticated app, encrypted settings, restart and simulated container intercept verified")
@@ -315,5 +362,7 @@ if __name__ == "__main__":
         provider_probe(sys.argv[1])
     elif len(sys.argv) == 2 and sys.argv[1] in {"write", "read", "verify"}:
         probe(sys.argv[1])
+    elif len(sys.argv) == 2 and sys.argv[1] in {"jobs_prepare", "jobs_recover", "jobs_verify"}:
+        jobs_probe(sys.argv[1])
     else:
         integration()

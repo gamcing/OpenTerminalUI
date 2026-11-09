@@ -84,6 +84,11 @@ async def lifespan(app: FastAPI):
     hub = get_marketdata_hub()
     await hub.start()
 
+    from backend.shared.db import snapshot_storage
+    if snapshot_storage is not None:
+        from backend.services.backtest_jobs import get_backtest_job_service
+        await get_backtest_job_service().recover_snapshot_jobs()
+
     get_alert_evaluator_service().start(hub)
     get_paper_engine().start(hub)
 
@@ -102,6 +107,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    if snapshot_storage is not None:
+        await get_backtest_job_service().stop_snapshot_worker()
     if _prefetch_worker:
         await _prefetch_worker.stop()
     if _instruments_loader:
