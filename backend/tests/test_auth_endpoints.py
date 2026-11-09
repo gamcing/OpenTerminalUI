@@ -158,3 +158,22 @@ def test_forgot_access_resets_password_and_revokes_refresh_tokens() -> None:
         assert active_tokens == 1
     finally:
         db.close()
+
+
+def test_forgot_access_cannot_reset_password_in_production(monkeypatch) -> None:
+    app, _ = _build_test_app()
+    client = TestClient(app)
+    email = "production-reset@example.com"
+    _register_and_login(client, email=email, password="password123")
+
+    monkeypatch.setenv("OPENTERMINALUI_ENV", "production")
+    response = client.post(
+        "/api/auth/forgot-access",
+        json={"email": email, "new_password": "attacker-password"},
+    )
+    assert response.status_code == 403
+    # Test the old credentials after returning to development mode, so this
+    # check does not depend on unrelated production secret configuration.
+    monkeypatch.setenv("OPENTERMINALUI_ENV", "development")
+    assert client.post("/api/auth/login", json={"email": email, "password": "password123"}).status_code == 200
+    assert client.post("/api/auth/login", json={"email": email, "password": "attacker-password"}).status_code == 401

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from backend.api.deps import get_db
 from backend.auth.jwt import create_access_token, create_refresh_token, decode_token, refresh_expiry_utc
+from backend.config.security import is_development_env
 from backend.models.user import RefreshToken, User, UserRole
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -174,6 +175,11 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenPair
 @router.post("/forgot-access", status_code=204)
 @limiter.limit("3/hour")
 def forgot_access(request: Request, payload: ForgotAccessRequest, db: Session = Depends(get_db)) -> None:
+    # This legacy flow has no proof of account ownership. It must never reset
+    # passwords on an internet-facing production deployment.
+    if not is_development_env():
+        raise HTTPException(status_code=403, detail="Password reset is unavailable; contact an administrator")
+
     email = _normalize_email(payload.email)
     _validate_email(email)
     _validate_password(payload.new_password)

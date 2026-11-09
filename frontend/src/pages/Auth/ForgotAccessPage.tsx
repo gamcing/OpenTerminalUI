@@ -42,8 +42,12 @@ export function ForgotAccessPage() {
       });
       setMessage("Access updated. You can now sign in with your new password.");
       window.setTimeout(() => navigate("/login", { replace: true }), 900);
-    } catch {
-      setError("Could not reset access. Try again.");
+    } catch (error) {
+      if (axios.isAxiosError(error) && error.response?.status === 403) {
+        setError("Password reset is unavailable. Contact your administrator.");
+      } else {
+        setError("Could not reset access. Try again.");
+      }
     } finally {
       setIsSubmitting(false);
     }
