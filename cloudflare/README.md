@@ -54,6 +54,7 @@ python -m cloudflare.watchlists_local_integration
 python -m cloudflare.identity_migration_local_integration
 python -m cloudflare.identity_staging_local_integration
 python -m cloudflare.user_layouts_local_integration
+python -m cloudflare.sqlite_images_local_integration
 ```
 
 The identity tests delete users from the local database; use an isolated disposable database. D1 identity is connected to authentication and authorization only in explicitly enabled, loopback-only development tests; production use is rejected. The fixed token is **only for local testing**. Any future deployed gateway must use an independently generated high-entropy secret, protect it as a Cloudflare secret, limit access to the backend, and avoid exposing arbitrary SQL execution to clients. The tests exercise local D1 and do not establish production durability, transactional compatibility of the application, or a complete deployment.
@@ -106,3 +107,9 @@ This is not a production deployment. Agent proposal and alert actions that write
 After applying `migrations/0008_user_layouts.sql`, set `OPENTERMINALUI_USER_LAYOUTS_STORE=d1` alongside the isolated D1 identity test settings to exercise launchpad layout reads and writes against D1. The offline importer preserves existing IDs, user keys, timestamps, and layout JSON; it refuses a nonempty layouts target and malformed source JSON. An unfinished staged import must be resolved before the migration can be applied.
 
 The existing route stores an `anonymous` layout when no authenticated user is present; the D1 implementation preserves that shared behavior. This is not production-ready, and other application data still requires migration.
+
+## Experimental complete SQLite image storage
+
+`migrations/0009_sqlite_image_storage.sql` and `backend/cloudflare/sqlite_images.py` explore storing complete standalone SQLite images in private D1. A caller supplies an image UUID before staging, uploads bounded chunks, verifies the bytes and SHA-256 digest, and publishes with a revision check in one D1 batch. A concurrent writer based on an older revision is rejected. A lost publish response has an unknown outcome: inspect the current head before taking any recovery action. The integration test uses a disposable D1 database and exercises restoration, concurrent publishing and interrupted uploads.
+
+**This is not an application database adapter.** It is not connected to SQLAlchemy, migrations, startup or transaction commits. Capturing a connection with pending writes does not prove that the local SQLite commit will succeed. Correct integration still needs comprehensive coordination of all readers and writers, crash recovery, fencing across container instances, handling of unknown outcomes, durable non-database files, and validation under real Cloudflare failures. Do not use it for real data. The prototype reads each image into memory, has a 64 MiB image limit, and retains all published images indefinitely; it therefore has significant storage and transfer costs and is unsuitable for ongoing production use. The staged and published bytes may contain sensitive application data; do not log them or expose the private gateway. Interrupted uploads may leave staged data; retain the UUID and remove an abandoned unsealed image only after its outcome is known.
