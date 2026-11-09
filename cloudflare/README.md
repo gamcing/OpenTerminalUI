@@ -48,9 +48,10 @@ In a second terminal, run:
 node cloudflare/d1-local.integration.mjs
 python -m cloudflare.d1_local_integration
 python -m cloudflare.identity_local_integration
+python -m cloudflare.identity_migration_local_integration
 ```
 
-The identity test deletes users from the local database; use an isolated disposable database. The identity repository is a standalone prototype and is not connected to authentication or authorization. The fixed token is **only for local testing**. Any future deployed gateway must use an independently generated high-entropy secret, protect it as a Cloudflare secret, limit access to the backend, and avoid exposing arbitrary SQL execution to clients. The tests exercise local D1 and do not establish production durability, transactional compatibility of the application, or a complete deployment.
+The identity tests delete users from the local database; use an isolated disposable database. The identity repository is a standalone prototype and is not connected to authentication or authorization. The fixed token is **only for local testing**. Any future deployed gateway must use an independently generated high-entropy secret, protect it as a Cloudflare secret, limit access to the backend, and avoid exposing arbitrary SQL execution to clients. The tests exercise local D1 and do not establish production durability, transactional compatibility of the application, or a complete deployment.
 
 ## Experimental container runtime
 
@@ -72,3 +73,9 @@ python -m cloudflare.saved_views_api_local_integration
 ```
 
 These tests reset the local test users and require an isolated disposable database. They exercise D1 schema creation, foreign keys, saved-view CRUD, HTTP routes, MCP reads and user isolation. Full deployment still requires identity migration, existing-data migration, the remaining application domains, durable files and end-to-end recovery checks.
+
+## Experimental identity and saved-view import
+
+`backend/cloudflare/identity_migration.py` provides an offline copy primitive for these three tables only. It preserves IDs and relationships and refuses a nonempty target. Its D1 writes are one atomic batch; the client rejects a snapshot exceeding its 1 MiB request limit. The caller must stop source writes, read from a stable source snapshot (SQLite read transaction or PostgreSQL repeatable read), and keep writes stopped throughout cutover. A timeout or database error can leave the commit outcome unknown: inspect the target before any retry. The snapshot contains password hashes and refresh token IDs and must not be logged or stored in unencrypted files.
+
+This primitive is not a deployment or a full migration: there is no production import command or coordinated cutover, and every other application domain and durable file still needs migration. Do not use it to enable the experimental stores for live users. The local integration test uses a disposable database.
