@@ -11,7 +11,7 @@ import hashlib
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from backend.cloudflare.d1 import D1BatchClient, D1BatchOutcomeUnknown, D1Statement
 
@@ -131,6 +131,10 @@ class D1SQLiteImageStore:
             "LEFT JOIN cf_sqlite_images i ON i.id=h.image_id AND i.sealed=1 "
             "AND i.database_name=h.database_name WHERE h.database_name=?", [name],
         )])[0].get("results")
+        return self._parse_head(name, rows)
+
+    @staticmethod
+    def _parse_head(name: str, rows) -> SQLiteImageInfo | None:
         if not isinstance(rows, list) or len(rows) > 1:
             raise D1BatchOutcomeUnknown("invalid SQLite image head")
         if not rows:
@@ -149,15 +153,30 @@ class D1SQLiteImageStore:
         return SQLiteImageInfo(name, revision, image_id, size, count, digest)
 
     def head(self, database_name: str) -> SQLiteImage | None:
-        info = self.head_info(database_name)
-        if info is None:
-            return None
-        image = self._read_chunks(info.image_id, info.chunk_count, info.byte_count, info.sha256)
+        name = _name(database_name)
+        pin_id = str(uuid4())
         try:
-            _check_image(image)
-        except ValueError:
-            raise D1BatchOutcomeUnknown("invalid SQLite image") from None
-        return SQLiteImage(info.database_name, info.revision, info.image_id, image)
+            results = self.client.batch([
+                D1Statement("INSERT INTO cf_sqlite_image_pins (id,database_name,image_id,revision) "
+                            "SELECT ?,database_name,image_id,revision FROM cf_sqlite_heads WHERE database_name=?",
+                            [pin_id, name]),
+                D1Statement("SELECT p.revision,i.id,i.byte_count,i.chunk_count,i.sha256 "
+                            "FROM cf_sqlite_image_pins p LEFT JOIN cf_sqlite_images i "
+                            "ON i.id=p.image_id AND i.sealed=1 AND i.database_name=p.database_name "
+                            "WHERE p.id=?", [pin_id]),
+            ])
+            info = self._parse_head(name, results[1].get("results"))
+            if info is None:
+                return None
+            image = self._read_chunks(info.image_id, info.chunk_count, info.byte_count, info.sha256)
+            try:
+                _check_image(image)
+            except ValueError:
+                raise D1BatchOutcomeUnknown("invalid SQLite image") from None
+            return SQLiteImage(info.database_name, info.revision, info.image_id, image)
+        finally:
+            # Never expire a live reader. A failed release may leak a harmless pin.
+            self.client.batch([D1Statement("DELETE FROM cf_sqlite_image_pins WHERE id=?", [pin_id])])
 
     def stage(self, database_name: str, parent_revision: int, image_id: str, image: bytes) -> None:
         name = _name(database_name)
@@ -176,23 +195,23 @@ class D1SQLiteImageStore:
         for ordinal in range(count):
             chunk = image[ordinal * _CHUNK_SIZE:(ordinal + 1) * _CHUNK_SIZE]
             chunk_digest = hashlib.sha256(chunk).hexdigest()
+            # Reference an existing chunk atomically with checking its existence,
+            # so concurrent collection cannot delete it between check and use.
             rows = self.client.batch([D1Statement(
-                "SELECT 1 AS present FROM cf_sqlite_chunk_pool WHERE database_name=? AND sha256=?",
-                [name, chunk_digest],
+                "INSERT INTO cf_sqlite_image_chunks (image_id,ordinal,data_base64) "
+                "SELECT ?,?,? WHERE EXISTS (SELECT 1 FROM cf_sqlite_chunk_pool WHERE database_name=? AND sha256=?) "
+                "RETURNING ordinal", [image_id, ordinal, "@" + chunk_digest, name, chunk_digest],
             )])[0].get("results")
-            if rows not in ([], [{"present": 1}]):
-                raise D1BatchOutcomeUnknown("invalid SQLite chunk lookup")
-            statements = [D1Statement(
-                "INSERT INTO cf_sqlite_image_chunks (image_id,ordinal,data_base64) VALUES (?,?,?)",
-                [image_id, ordinal, "@" + chunk_digest],
-            )]
-            if not rows:
-                statements.append(D1Statement(
-                    "INSERT INTO cf_sqlite_chunk_pool (database_name,sha256,data_base64) VALUES (?,?,?) "
-                    "ON CONFLICT(database_name,sha256) DO NOTHING",
-                    [name, chunk_digest, base64.b64encode(chunk).decode("ascii")],
-                ))
-            self.client.batch(statements)
+            if rows == []:
+                self.client.batch([
+                    D1Statement("INSERT INTO cf_sqlite_chunk_pool (database_name,sha256,data_base64) VALUES (?,?,?) "
+                                "ON CONFLICT(database_name,sha256) DO NOTHING",
+                                [name, chunk_digest, base64.b64encode(chunk).decode("ascii")]),
+                    D1Statement("INSERT INTO cf_sqlite_image_chunks (image_id,ordinal,data_base64) VALUES (?,?,?)",
+                                [image_id, ordinal, "@" + chunk_digest]),
+                ])
+            elif rows != [{"ordinal": ordinal}]:
+                raise D1BatchOutcomeUnknown("invalid SQLite chunk reference result")
         # Check the actual stored bytes before the final transaction publishes them.
         if self._read_chunks(image_id, count, len(image), digest) != image:
             raise D1BatchOutcomeUnknown("SQLite image verification failed")
@@ -242,3 +261,55 @@ class D1SQLiteImageStore:
     def abort(self, image_id: str) -> None:
         """Delete an unsealed image only; a committed image is never deleted."""
         self.client.batch([D1Statement("DELETE FROM cf_sqlite_images WHERE id=? AND sealed=0", [_image_id(image_id)])])
+
+
+    def published_receipt(self, image_id: str) -> tuple[str, int, str] | None:
+        """Resolve a published image ID even after its image bytes are collected."""
+        image_id = _image_id(image_id)
+        rows = self.client.batch([D1Statement(
+            "SELECT database_name,parent_revision+1 AS revision,sha256 FROM cf_sqlite_images WHERE id=? AND sealed=1 "
+            "UNION ALL SELECT database_name,revision,sha256 FROM cf_sqlite_publication_receipts WHERE image_id=?",
+            [image_id, image_id],
+        )])[0].get("results")
+        if not isinstance(rows, list) or len(rows) > 1:
+            raise D1BatchOutcomeUnknown("invalid publication receipt")
+        if not rows:
+            return None
+        try:
+            name, revision, digest = rows[0]["database_name"], rows[0]["revision"], rows[0]["sha256"]
+            _name(name)
+            if type(revision) is not int or revision < 1 or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            raise D1BatchOutcomeUnknown("invalid publication receipt") from None
+        return name, revision, digest
+
+    def collect(self, database_name: str, *, keep_revisions: int = 2, limit: int = 32) -> tuple[int, int]:
+        """Collect a bounded batch of old unpinned images and unreferenced chunks.
+
+        Call only after all readers have been upgraded to the pin protocol.
+        Unsealed images, heads, and all pins are preserved. No pin expires.
+        """
+        name = _name(database_name)
+        if type(keep_revisions) is not int or not 1 <= keep_revisions <= 1000:
+            raise ValueError("invalid revision retention")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("invalid collection limit")
+        results = self.client.batch([
+            D1Statement("DELETE FROM cf_sqlite_images WHERE id IN ("
+                        "SELECT i.id FROM cf_sqlite_images i JOIN cf_sqlite_heads h ON h.database_name=i.database_name "
+                        "WHERE i.database_name=? AND i.sealed=1 AND i.id<>h.image_id "
+                        "AND i.parent_revision<h.revision-? "
+                        "AND NOT EXISTS (SELECT 1 FROM cf_sqlite_image_pins p WHERE p.image_id=i.id) "
+                        "ORDER BY i.parent_revision LIMIT ?) RETURNING id", [name, keep_revisions, limit]),
+            D1Statement("DELETE FROM cf_sqlite_chunk_pool WHERE rowid IN ("
+                        "SELECT p.rowid FROM cf_sqlite_chunk_pool p WHERE p.database_name=? "
+                        "AND NOT EXISTS (SELECT 1 FROM cf_sqlite_image_chunks c "
+                        "JOIN cf_sqlite_images i ON i.id=c.image_id "
+                        "WHERE i.database_name=p.database_name AND c.data_base64='@' || p.sha256) "
+                        "LIMIT ?) RETURNING sha256", [name, limit]),
+        ])
+        images, chunks = results[0].get("results"), results[1].get("results")
+        if not isinstance(images, list) or not isinstance(chunks, list):
+            raise D1BatchOutcomeUnknown("invalid SQLite collection result")
+        return len(images), len(chunks)

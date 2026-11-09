@@ -30,7 +30,8 @@ os.environ.update({
 })
 client = D1BatchClient("http://127.0.0.1:8899", "test-secret-only-not-for-production-1234567890", allow_insecure_localhost=True)
 schema = (Path("cloudflare/migrations/0009_sqlite_image_storage.sql").read_text(encoding="utf-8")
-          + Path("cloudflare/migrations/0010_sqlite_chunk_pool.sql").read_text(encoding="utf-8"))
+          + Path("cloudflare/migrations/0010_sqlite_chunk_pool.sql").read_text(encoding="utf-8")
+          + Path("cloudflare/migrations/0011_sqlite_snapshot_gc.sql").read_text(encoding="utf-8"))
 statements, pending = [], ""
 for line in schema.splitlines(keepends=True):
     pending += line
