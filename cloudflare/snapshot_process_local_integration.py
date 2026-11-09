@@ -247,16 +247,28 @@ def integration() -> None:
         # process, including the real Alembic CLI and the application import.
         # No real container or Cloudflare network is involved in this test.
         (root / "sitecustomize.py").write_text("""
+import json
+import os
 import urllib.request
 from urllib.parse import urlsplit
 import backend.cloudflare.d1 as d1
 original = d1._open
+publish_count = 0
 def intercepted(request, timeout):
+    global publish_count
     url = urlsplit(request.full_url)
     assert url.scheme == 'http' and url.netloc == 'openterminal-d1.internal'
     forwarded = urllib.request.Request('http://127.0.0.1:8899' + url.path, data=request.data,
                                        method=request.get_method(), headers=dict(request.header_items()))
-    return original(forwarded, timeout)
+    response = original(forwarded, timeout)
+    if os.getenv('TEST_LOSE_ADMIN_PUBLISH') == '1':
+        statements = json.loads(request.data)['statements']
+        if any('INSERT INTO cf_sqlite_heads' in item['sql'] for item in statements):
+            publish_count += 1
+            if publish_count == 2:
+                response.close()
+                raise OSError('simulated lost admin commit response')
+    return response
 d1.D1BatchClient.__init__.__kwdefaults__['opener'] = intercepted
 """, encoding="utf-8")
         container_key = "container-simulation-" + str(uuid4())
@@ -278,7 +290,15 @@ d1.D1BatchClient.__init__.__kwdefaults__['opener'] = intercepted
             run(["-c", "import backend.shared.db"], overrides=overrides, success=False)
         assert store.head(container_key) is None
         run(["-m", "alembic", "-c", "backend/alembic.ini", "upgrade", "head"])
-        run(["scripts/seed_admin.py"])
+        run(["scripts/seed_admin.py"], overrides={"BOOTSTRAP_ADMIN_EMAIL": "", "BOOTSTRAP_ADMIN_PASSWORD": ""},
+            success=False)
+        # Simulate D1 committing the new admin while its response is lost.
+        # The seed must fail; a fresh process fences and finds the committed admin.
+        failed_seed = run(["scripts/seed_admin.py"], overrides={"TEST_LOSE_ADMIN_PUBLISH": "1"}, success=False)
+        assert "database initialization failed" in failed_seed.stdout
+        assert "local-test-password-only" not in failed_seed.stdout + failed_seed.stderr
+        # Once an admin exists, the bootstrap secret need not remain configured.
+        run(["scripts/seed_admin.py"], overrides={"BOOTSTRAP_ADMIN_EMAIL": "", "BOOTSTRAP_ADMIN_PASSWORD": ""})
         run(["-m", "cloudflare.snapshot_process_local_integration", "write"])
         run(["-m", "cloudflare.snapshot_process_local_integration", "read"])
         run(["-m", "cloudflare.snapshot_process_local_integration", "realapp"])
