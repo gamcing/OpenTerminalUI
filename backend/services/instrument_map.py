@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from backend.config.settings import get_settings
 from backend.core.kite_client import KiteClient
 from backend.db.base import sqlite_file_from_url
-from backend.shared.sqlite_utils import configure_sqlite_connection
+from backend.shared.sqlite_utils import sqlite_service_connection
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +42,8 @@ class InstrumentMapService:
             await asyncio.to_thread(self._init_table)
             self._ready = True
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.sqlite_path), check_same_thread=False, timeout=15)
-        configure_sqlite_connection(conn)
-        return conn
+    def _connect(self):
+        return sqlite_service_connection(self.sqlite_path)
 
     def _init_table(self) -> None:
         with self._connect() as conn:

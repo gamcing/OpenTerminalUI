@@ -66,6 +66,15 @@ def probe(action: str) -> None:
                 assert http.post("/api/watchlists/" + row["id"] + "/symbols", headers=headers, json=["NVDA"]).status_code == 200
             else:
                 assert row["symbols"] == ["SPY", "MSFT", "NVDA"]
+    if action == "verify":
+        from backend.models.core import FutureContract
+        from backend.services.instrument_map import InstrumentMapService
+        with database.SessionLocal() as session:
+            row = session.query(FutureContract).filter_by(tradingsymbol="TESTFUT").one()
+            assert row.instrument_token == 12345 and row.lot_size == 50
+        instruments = InstrumentMapService()
+        assert instruments._resolve_many(["NFO:TESTFUT"]) == {"NFO:TESTFUT": 12345}
+        assert instruments._symbol_by_token_many([12345]) == {12345: "NFO:TESTFUT"}
     database.snapshot_storage.close()
     print("snapshot process " + action + " passed")
 
@@ -89,6 +98,31 @@ def real_application_probe() -> None:
     assert response.json()[0]["symbols"] == ["SPY", "MSFT", "NVDA"]
     assert client.get("/api/watchlists").status_code == 401
     client.close()
+
+    # These services historically bypassed SQLAlchemy and opened a different
+    # SQLite file. Exercise their actual write paths against the coordinator.
+    from backend.bg_services.instruments_loader import FutureContractRow, InstrumentsLoader
+    from backend.models.core import FutureContract
+    from backend.services.instrument_map import InstrumentMapService, InstrumentRow
+    from backend.shared.db import SessionLocal
+    from sqlalchemy.exc import IntegrityError
+
+    loader = InstrumentsLoader()
+    loader._upsert_rows([FutureContractRow("TEST", "2026-12-31", "NFO", "TESTFUT", 12345, 50, 0.05,
+                                           "2026-11-09T00:00:00Z")])
+    with SessionLocal() as session:
+        assert session.query(FutureContract).filter_by(tradingsymbol="TESTFUT").one().instrument_token == 12345
+    instruments = InstrumentMapService()
+    instruments._init_table()
+    row = InstrumentRow("NFO", "TESTFUT", 12345, "TESTFUT", "2026-11-09T00:00:00Z")
+    instruments._replace_rows([row])
+    try:
+        instruments._replace_rows([row, row])
+    except IntegrityError:
+        pass
+    else:
+        raise AssertionError("duplicate instrument replacement should roll back")
+    assert instruments._resolve_many(["NFO:TESTFUT"]) == {"NFO:TESTFUT": 12345}
     snapshot_storage.close()
     print("real application login and restored watchlist passed without lifespan")
 
@@ -158,6 +192,7 @@ def integration() -> None:
         run(["-m", "cloudflare.snapshot_process_local_integration", "realapp"])
         run(["-m", "cloudflare.snapshot_process_local_integration", "verify"])
         assert not (root / "fallback.sqlite").exists()
+        assert not (root / "cache.sqlite").exists(), "instrument services must not create a separate database"
         assert not list(root.glob("openterminalui-d1-local-*")), "temporary snapshots must be cleaned up"
     print("D1 snapshot local mode: separate migration, seed, authenticated app processes and restart verified")
 

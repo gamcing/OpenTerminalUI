@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -10,7 +9,7 @@ from typing import Any
 from backend.api.deps import get_unified_fetcher
 from backend.config.settings import get_settings
 from backend.db.base import sqlite_file_from_url
-from backend.shared.sqlite_utils import configure_sqlite_connection
+from backend.shared.sqlite_utils import sqlite_service_connection
 
 logger = logging.getLogger(__name__)
 
@@ -155,11 +154,8 @@ class InstrumentsLoader:
             except asyncio.TimeoutError:
                 continue
 
-    def _connect(self) -> sqlite3.Connection:
-        self.sqlite_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.sqlite_path), check_same_thread=False, timeout=15)
-        configure_sqlite_connection(conn)
-        return conn
+    def _connect(self):
+        return sqlite_service_connection(self.sqlite_path)
 
     def _upsert_rows(self, rows: list[FutureContractRow]) -> None:
         with self._connect() as conn:
