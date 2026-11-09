@@ -16,11 +16,12 @@ from backend.cloudflare.sqlalchemy_sqlite_prototype import SQLiteSnapshotCoordin
 
 
 class LocalSnapshotStorage:
-    def __init__(self, client: D1BatchClient, name: str) -> None:
+    def __init__(self, client: D1BatchClient, name: str, *, fence_on_start: bool = False) -> None:
         self._temporary = tempfile.TemporaryDirectory(prefix="openterminalui-d1-local-")
         self._closed = False
         try:
-            self.coordinator = SQLiteSnapshotCoordinator(D1SQLiteImageStore(client), name, Path(self._temporary.name))
+            self.coordinator = SQLiteSnapshotCoordinator(D1SQLiteImageStore(client), name, Path(self._temporary.name),
+                                                         fence_on_start=fence_on_start)
             self.engine = self.coordinator.create_engine()
         except BaseException:
             self._temporary.cleanup()
@@ -64,4 +65,5 @@ def local_snapshot_storage_from_env() -> LocalSnapshotStorage | None:
                                allow_intercepted_container_origin=container)
     except ValueError:
         raise RuntimeError("Invalid D1 snapshot gateway configuration") from None
-    return LocalSnapshotStorage(client, os.getenv("OPENTERMINALUI_D1_SNAPSHOT_NAME", "openterminalui-local"))
+    return LocalSnapshotStorage(client, os.getenv("OPENTERMINALUI_D1_SNAPSHOT_NAME", "openterminalui-local"),
+                                fence_on_start=container)

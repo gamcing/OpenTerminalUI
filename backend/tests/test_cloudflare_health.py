@@ -26,5 +26,6 @@ def test_health_reflects_snapshot_coordinator_state(monkeypatch):
     coordinator.poisoned = True
     response = client.get("/health")
     assert response.status_code == 503
+    assert response.headers["X-OpenTerminalUI-Recovery"] == "d1-snapshot"
     assert response.json() == {"detail": "Database recovery required"}
     assert "private internal details" not in response.text

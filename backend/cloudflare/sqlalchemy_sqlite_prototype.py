@@ -127,7 +127,8 @@ class SnapshotConnection(sqlite3.Connection):
 
 
 class SQLiteSnapshotCoordinator:
-    def __init__(self, store: D1SQLiteImageStore, database_name: str, directory: Path):
+    def __init__(self, store: D1SQLiteImageStore, database_name: str, directory: Path, *,
+                 fence_on_start: bool = False):
         self.store = store
         self.database_name = database_name
         self._lock = threading.RLock()
@@ -153,6 +154,26 @@ class SQLiteSnapshotCoordinator:
                 raise SnapshotCoordinatorError("could not enable SQLite WAL")
         finally:
             initial.close()
+        if fence_on_start:
+            self._fence_startup(head)
+
+    def _fence_startup(self, head):
+        # Advance the remote revision before this process can serve traffic.
+        # A delayed publication against the prior revision must then fail its
+        # D1 compare-and-swap. A failed/unknown fence aborts initialization.
+        if head is None:
+            empty = sqlite3.connect(":memory:")
+            try:
+                empty.execute("PRAGMA user_version=0")
+                image = capture_sqlite_image(empty)
+            finally:
+                empty.close()
+        else:
+            image = head.data
+        image_id = str(uuid4())
+        self.store.stage(self.database_name, self._revision, image_id, image)
+        revision = self.store.publish(self.database_name, self._revision, image_id)
+        self._revision, self._image_id = revision, image_id
 
     def check(self):
         if self._poisoned:

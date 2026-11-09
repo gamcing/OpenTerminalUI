@@ -16,11 +16,12 @@ def container_env(monkeypatch):
     for key in ("OPENTERMINALUI_IDENTITY_STORE", "OPENTERMINALUI_SAVED_VIEWS_STORE",
                 "OPENTERMINALUI_WATCHLISTS_STORE", "OPENTERMINALUI_USER_LAYOUTS_STORE"):
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setattr(snapshot_storage, "LocalSnapshotStorage", lambda client, name: (client, name))
+    monkeypatch.setattr(snapshot_storage, "LocalSnapshotStorage", lambda client, name, **kwargs: (client, name, kwargs))
 
 
 def test_explicit_container_snapshot_uses_private_origin(container_env):
-    client, name = snapshot_storage.local_snapshot_storage_from_env()
+    client, name, kwargs = snapshot_storage.local_snapshot_storage_from_env()
+    assert kwargs == {"fence_on_start": True}
     assert client._endpoint == "http://openterminal-d1.internal/batch"
     assert name == "openterminalui-local"
 

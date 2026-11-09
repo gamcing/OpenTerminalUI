@@ -263,4 +263,73 @@ with tempfile.TemporaryDirectory() as temp:
     assert rows(final_engine)[-1] == (6, "remote only")
     final_engine.dispose()
 
-print("D1 SQLAlchemy prototype: transactions, rollback, deferred FK, stale instances and unknown outcomes verified")
+    # A delayed publication prepared by an earlier process must not commit
+    # after a replacement has fenced its restored revision.
+    fence_key = "startup-fence-" + str(uuid4())
+    previous = SQLiteSnapshotCoordinator(store, fence_key, directory("pre-fence"))
+    previous_engine = previous.create_engine()
+    with previous_engine.begin() as conn:
+        conn.execute(text("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)"))
+        conn.execute(text("INSERT INTO items(name) VALUES ('before restart')"))
+    old_head = store.head(fence_key)
+    delayed_id = str(uuid4())
+    store.stage(fence_key, old_head.revision, delayed_id, old_head.data)
+    replacement = SQLiteSnapshotCoordinator(store, fence_key, directory("fenced"), fence_on_start=True)
+    replacement_engine = replacement.create_engine()
+    fenced_head = store.head(fence_key)
+    assert fenced_head.revision == old_head.revision + 1
+    assert fenced_head.data == old_head.data
+    try:
+        store.publish(fence_key, old_head.revision, delayed_id)
+    except D1BatchOutcomeUnknown:
+        pass
+    else:
+        raise AssertionError("delayed old publication must be fenced")
+    assert rows(replacement_engine) == [(1, "before restart")]
+    try:
+        rows(previous_engine)
+    except SnapshotCoordinatorError:
+        pass
+    else:
+        raise AssertionError("previous process must detect the fence")
+    previous_engine.dispose()
+    replacement_engine.dispose()
+
+    # The same rule applies before the first application migration: a delayed
+    # initial publication cannot win after an empty database has been fenced.
+    empty_key = "empty-fence-" + str(uuid4())
+    first_id = str(uuid4())
+    store.stage(empty_key, 0, first_id, old_head.data)
+    empty = SQLiteSnapshotCoordinator(store, empty_key, directory("empty-fenced"), fence_on_start=True)
+    assert store.head_info(empty_key).revision == 1
+    try:
+        store.publish(empty_key, 0, first_id)
+    except D1BatchOutcomeUnknown:
+        pass
+    else:
+        raise AssertionError("delayed initial publication must be fenced")
+    empty.check()
+
+    # A fence response can itself be lost after D1 commits. Startup must fail;
+    # a later process restores the head and publishes a fresh fence.
+    class LostFence:
+        def head(self, name): return store.head(name)
+        def stage(self, *args): return store.stage(*args)
+        def publish(self, *args):
+            store.publish(*args)
+            raise D1BatchOutcomeUnknown("simulated lost fence response")
+    prior_revision = store.head_info(fence_key).revision
+    try:
+        SQLiteSnapshotCoordinator(LostFence(), fence_key, directory("uncertain-fence"), fence_on_start=True)
+    except D1BatchOutcomeUnknown:
+        pass
+    else:
+        raise AssertionError("unknown fence outcome must prevent startup")
+    assert store.head_info(fence_key).revision == prior_revision + 1
+    after_unknown = SQLiteSnapshotCoordinator(store, fence_key, directory("after-unknown-fence"), fence_on_start=True)
+    assert store.head_info(fence_key).revision == prior_revision + 2
+    after_engine = after_unknown.create_engine()
+    assert rows(after_engine) == [(1, "before restart")]
+    after_engine.dispose()
+
+print("D1 SQLAlchemy prototype: transactions, rollback, recovery, startup fencing and unknown outcomes verified")

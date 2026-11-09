@@ -4,6 +4,7 @@ export const D1_INTERNAL_HOST = "openterminal-d1.internal";
 export const R2_INTERNAL_HOST = "openterminal-r2.internal";
 export const BACKEND_PORT = 8000;
 export const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
+export const RECOVERY_COOLDOWN_MS = 60 * 1000;
 
 const forwardedSettings = [
   "JWT_SECRET_KEY", "CACHE_SIGNING_KEY", "BOOTSTRAP_ADMIN_EMAIL", "BOOTSTRAP_ADMIN_PASSWORD",
@@ -60,10 +61,12 @@ export function containerEnvironment(env) {
 }
 
 export class ContainerRuntime {
-  constructor(ctx, env, wait = ms => new Promise(resolve => setTimeout(resolve, ms))) {
+  constructor(ctx, env, wait = ms => new Promise(resolve => setTimeout(resolve, ms)), now = () => Date.now()) {
     this.ctx = ctx;
     this.env = env;
     this.wait = wait;
+    this.now = now;
+    this.lastRecoveryAt = null;
     this.starting = null;
     this.monitoring = null;
   }
@@ -102,10 +105,8 @@ export class ContainerRuntime {
     return this.starting;
   }
 
-  async startAndWait() {
-    const container = this.ctx.container;
-    if (!container) throw new Error("Container binding is unavailable");
-    const environment = containerEnvironment(this.env);
+  async prepareContainer(container, environment) {
+    // Intercepts disappear when a container stops, and must precede each start.
     await this.installPrivateIntercepts(container);
     if (!container.running) {
       container.start({
@@ -117,14 +118,41 @@ export class ContainerRuntime {
     }
     await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
     this.observeExit(container);
-    const port = container.getTcpPort(BACKEND_PORT);
+  }
+
+  async startAndWait() {
+    const container = this.ctx.container;
+    if (!container) throw new Error("Container binding is unavailable");
+    const environment = containerEnvironment(this.env);
+    await this.prepareContainer(container, environment);
+    let recovered = false;
     for (let attempt = 0; attempt < 100; attempt++) {
+      let probe;
       try {
-        const probe = await port.fetch("http://container/health", { signal: AbortSignal.timeout(1000) });
-        await probe.body?.cancel();
-        if (probe.ok) return;
+        const port = container.getTcpPort(BACKEND_PORT);
+        probe = await port.fetch("http://container/health", { signal: AbortSignal.timeout(1000) });
       } catch {
         // The process can need time to migrate its database and bind the port.
+      }
+      if (probe) {
+        const needsRecovery = probe.status === 503 &&
+          probe.headers.get("X-OpenTerminalUI-Recovery") === "d1-snapshot";
+        await probe.body?.cancel();
+        if (probe.ok) return;
+        if (needsRecovery && this.env.OPENTERMINALUI_CF_D1_SNAPSHOT_EXPERIMENT === "1") {
+          const now = this.now();
+          if (recovered || (this.lastRecoveryAt !== null && now - this.lastRecoveryAt < RECOVERY_COOLDOWN_MS))
+            throw new Error("Container recovery is cooling down");
+          this.lastRecoveryAt = now;
+          recovered = true;
+          // Never replay an application request. Stopping may interrupt ones
+          // already in flight; the new process fences delayed D1 publications.
+          await container.destroy();
+          if (this.monitoring) await this.monitoring;
+          await this.prepareContainer(container, environment);
+          attempt = -1;
+          continue;
+        }
       }
       await this.wait(500);
     }

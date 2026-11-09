@@ -2,12 +2,17 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { BACKEND_PORT, ContainerRuntime, D1_INTERNAL_HOST, R2_INTERNAL_HOST, INACTIVITY_TIMEOUT_MS, containerEnvironment, keepScheduledContainerWarm } from "./container-runtime.mjs";
 
-function setup({ initiallyRunning = false, probeFailures = 0, unhealthy = false, failIntercept = false, failHost = "" } = {}) {
+function setup({ initiallyRunning = false, probeFailures = 0, unhealthy = false, poisoned = false,
+  stayPoisoned = false, failDestroy = false, failIntercept = false, failHost = "" } = {}) {
   const events = [];
+  let resolveMonitor;
   const port = { async fetch(request) {
     const url = typeof request === "string" ? request : request.url;
     events.push(["fetch", url]);
     if (url === "http://container/health" && probeFailures-- > 0) throw Error("starting");
+    if (url === "http://container/health" && poisoned) return new Response("unavailable", {
+      status: 503, headers: { "X-OpenTerminalUI-Recovery": "d1-snapshot" },
+    });
     if (url === "http://container/health" && unhealthy) return new Response("unavailable", { status: 503 });
     return new Response(url === "http://container/health" ? "ok" : "backend response");
   } };
@@ -20,7 +25,14 @@ function setup({ initiallyRunning = false, probeFailures = 0, unhealthy = false,
     },
     start(options) { events.push(["start", options]); this.running = true; },
     async setInactivityTimeout(ms) { events.push(["timeout", ms]); },
-    monitor() { events.push(["monitor"]); return new Promise(() => {}); },
+    monitor() { events.push(["monitor"]); return new Promise(resolve => { resolveMonitor = resolve; }); },
+    async destroy() {
+      events.push(["destroy"]);
+      if (failDestroy) throw Error("destroy failed");
+      this.running = false;
+      if (!stayPoisoned) poisoned = false;
+      resolveMonitor?.();
+    },
     getTcpPort(number) { assert.equal(number, BACKEND_PORT); return port; },
   };
   const ctx = { container, exports: { D1Gateway: () => "private-service", R2Gateway: () => "private-r2-service" }, waitUntil: () => {} };
@@ -54,6 +66,54 @@ test("does not forward requests when the running container reports unhealthy", a
   assert.equal(events.filter(e => e[0] === "start").length, 0);
   assert.equal(events.filter(e => e[0] === "fetch").length, 100);
   assert.ok(events.filter(e => e[0] === "fetch").every(e => e[1] === "http://container/health"));
+});
+
+function enableSnapshot(env) {
+  Object.assign(env, { OPENTERMINALUI_CF_D1_SNAPSHOT_EXPERIMENT: "1", DB: {},
+    D1_BRIDGE_TOKEN: "d".repeat(32), OPENTERMINALUI_PROVIDER_KEY_ENCRYPTION_KEY: "k".repeat(44) });
+}
+
+test("recovers a poisoned D1 container once and reinstalls intercepts before restart", async () => {
+  const { events, runtime, env } = setup({ initiallyRunning: true, poisoned: true });
+  enableSnapshot(env);
+  const [a, b] = await Promise.all([
+    runtime.fetch(new Request("https://example.com/api/one", { method: "POST" })),
+    runtime.fetch(new Request("https://example.com/api/two")),
+  ]);
+  assert.equal(await a.text(), "backend response");
+  assert.equal(await b.text(), "backend response");
+  assert.equal(events.filter(e => e[0] === "destroy").length, 1);
+  assert.equal(events.filter(e => e[0] === "start").length, 1);
+  assert.equal(events.filter(e => e[0] === "monitor").length, 2);
+  const destroyed = events.findIndex(e => e[0] === "destroy");
+  const started = events.findIndex(e => e[0] === "start");
+  assert.deepEqual(events.slice(destroyed + 1, started).map(e => e[0]), ["intercept", "intercept"]);
+  assert.equal(events.filter(e => e[0] === "fetch" && e[1] === "http://container/api/one").length, 1);
+});
+
+test("limits repeated recovery and never forwards a request to a poisoned replacement", async () => {
+  const { events, runtime, env } = setup({ initiallyRunning: true, poisoned: true, stayPoisoned: true });
+  enableSnapshot(env);
+  runtime.now = () => 1000;
+  await assert.rejects(runtime.fetch(new Request("https://example.com/api/one")), /cooling down/);
+  await assert.rejects(runtime.fetch(new Request("https://example.com/api/two")), /cooling down/);
+  assert.equal(events.filter(e => e[0] === "destroy").length, 1);
+  assert.equal(events.filter(e => e[0] === "start").length, 1);
+  assert.ok(events.filter(e => e[0] === "fetch").every(e => e[1] === "http://container/health"));
+  runtime.now = () => 62000;
+  await assert.rejects(runtime.fetch(new Request("https://example.com/api/three")), /cooling down/);
+  assert.equal(events.filter(e => e[0] === "destroy").length, 2);
+});
+
+test("does not recover without explicit snapshot mode or when destruction fails", async () => {
+  const disabled = setup({ initiallyRunning: true, poisoned: true });
+  await assert.rejects(disabled.runtime.fetch(new Request("https://example.com/")), /did not become ready/);
+  assert.equal(disabled.events.filter(e => e[0] === "destroy").length, 0);
+  const broken = setup({ initiallyRunning: true, poisoned: true, failDestroy: true });
+  enableSnapshot(broken.env);
+  await assert.rejects(broken.runtime.fetch(new Request("https://example.com/")), /destroy failed/);
+  assert.equal(broken.events.filter(e => e[0] === "start").length, 0);
+  assert.ok(broken.events.filter(e => e[0] === "fetch").every(e => e[1] === "http://container/health"));
 });
 
 test("concurrent requests share a single startup", async () => {

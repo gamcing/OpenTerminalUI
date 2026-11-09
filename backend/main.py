@@ -164,7 +164,8 @@ def health() -> dict[str, str]:
         try:
             snapshot_storage.coordinator.check()
         except SnapshotCoordinatorError:
-            raise HTTPException(status_code=503, detail="Database recovery required") from None
+            raise HTTPException(status_code=503, detail="Database recovery required",
+                                headers={"X-OpenTerminalUI-Recovery": "d1-snapshot"}) from None
     return {"status": "ok"}
 
 
